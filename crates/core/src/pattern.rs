@@ -7,7 +7,7 @@ pub fn expand_string(s: &str) -> Result<Vec<bool>> {
         match c {
             'x' => hits.push(true),
             '.' => hits.push(false),
-            ' ' | '\t' => {}
+            ' ' | '\t' | '\r' => {}
             other => {
                 return Err(Error::new(
                     Span { line: 1, col: 1 },
@@ -38,7 +38,14 @@ pub fn bar_triggers(pattern: &Expr, default_pitch: u8) -> Result<(usize, Vec<Opt
                     .collect(),
             ))
         }
-        Expr::Notes(notes, _) => {
+        Expr::Notes(notes, span) => {
+            if notes.is_empty() {
+                return Err(Error::new(
+                    *span,
+                    ErrorKind::Parse,
+                    "note array cannot be empty",
+                ));
+            }
             let pitches: Vec<Option<u8>> = notes.iter().map(|n| Some(n.midi)).collect();
             Ok((notes.len(), pitches))
         }
@@ -138,6 +145,20 @@ mod tests {
         .unwrap();
         assert_eq!(steps, 2);
         assert_eq!(pitches, vec![Some(60), Some(64)]);
+    }
+
+    #[test]
+    fn crlf_is_ignored() {
+        assert_eq!(
+            expand_string("x .\rx .\r").unwrap(),
+            vec![true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn empty_notes_rejected() {
+        let err = bar_triggers(&Expr::Notes(vec![], Span { line: 1, col: 1 }), 60).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
     }
 
     #[test]
