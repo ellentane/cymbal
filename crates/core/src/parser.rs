@@ -3,6 +3,10 @@ use crate::error::{Error, ErrorKind, Result, Span};
 use crate::lexer::{Token, TokenKind};
 
 pub fn parse(tokens: &[Token]) -> Result<Program> {
+    debug_assert!(
+        !tokens.is_empty(),
+        "parse requires lexer output ending in Eof"
+    );
     Parser { tokens, pos: 0 }.parse_program()
 }
 
@@ -465,5 +469,20 @@ loop "beat" tempo=90:
     fn missing_loop_name_is_parse_error() {
         let err = parse(&lex("loop:\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn comment_after_bind_does_not_break_loop_body() {
+        let src = "loop \"a\":\n    kick << \"x\" -- a comment\nlet y = kick()\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        assert_eq!(program.statements.len(), 2);
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!("expected loop")
+        };
+        assert_eq!(l.binds.len(), 1);
+        let Stmt::Let { name, .. } = &program.statements[1] else {
+            panic!("expected let")
+        };
+        assert_eq!(name, "y");
     }
 }

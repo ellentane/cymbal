@@ -124,10 +124,10 @@ impl Lexer {
                 '-' => {
                     if self.peek2().map(|(c2, _)| c2) == Some('-') {
                         while let Some((c, _)) = self.peek() {
-                            self.bump();
                             if c == '\n' {
                                 break;
                             }
+                            self.bump();
                         }
                     } else {
                         return Err(Error::new(span, ErrorKind::Lex, "unexpected character '-'"));
@@ -403,6 +403,7 @@ mod tests {
         assert_eq!(
             k(&tokens),
             vec![
+                TokenKind::Newline,
                 TokenKind::Ident("kick".into()),
                 TokenKind::Bind,
                 TokenKind::String("x".into()),
