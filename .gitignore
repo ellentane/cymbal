@@ -1,3 +1,5 @@
 /target/
 /docs/superpowers/
+/.worktrees/
 *.wav
+!crates/core/tests/data/
