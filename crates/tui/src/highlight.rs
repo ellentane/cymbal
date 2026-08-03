@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use cymbal_core::lexer::{TokenKind, lex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +10,7 @@ pub enum Class {
     Comment,
 }
 
+#[allow(dead_code)]
 pub fn classify(kind: &TokenKind) -> Class {
     match kind {
         TokenKind::Let | TokenKind::Loop | TokenKind::Tempo | TokenKind::Rev | TokenKind::Every => {

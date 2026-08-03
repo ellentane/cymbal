@@ -5,7 +5,6 @@ pub struct Editor {
     y: usize,
 }
 
-#[allow(dead_code)]
 impl Editor {
     pub fn new(content: String) -> Self {
         let lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
