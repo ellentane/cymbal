@@ -54,6 +54,8 @@ pub fn start_audio(
             e.to_string(),
         ))
     };
+    let channels = stream_config.channels as usize;
+    let mut scratch = vec![0.0f32; stream_config.sample_rate.0 as usize];
     let stream = device
         .build_output_stream(
             &stream_config,
@@ -61,10 +63,22 @@ pub fn start_audio(
                 while let Some(msg) = queue.try_recv() {
                     match msg {
                         crate::ring::Msg::Swap(tl) => engine.submit_swap(tl),
-                        crate::ring::Msg::Shutdown => return,
+                        crate::ring::Msg::Shutdown => {
+                            data.fill(0.0);
+                            return;
+                        }
                     }
                 }
-                engine.process(data);
+                let frames = data.len() / channels;
+                if frames > scratch.len() {
+                    scratch.resize(frames, 0.0);
+                }
+                engine.process(&mut scratch[..frames]);
+                for (i, frame) in scratch[..frames].iter().enumerate() {
+                    for out in data[i * channels..(i + 1) * channels].iter_mut() {
+                        *out = *frame;
+                    }
+                }
             },
             err_cb,
             None,
