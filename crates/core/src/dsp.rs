@@ -3,7 +3,7 @@ use crate::transport::Transport;
 
 fn noise(t: u64) -> f64 {
     let x = t as f64 * 12.9898;
-    (x.sin() * 43758.5453).fract() * 2.0 - 1.0
+    (x.sin() * 43758.5453).rem_euclid(1.0) * 2.0 - 1.0
 }
 
 pub struct Kick {
