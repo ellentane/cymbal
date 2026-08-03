@@ -8,5 +8,6 @@ rust-version.workspace = true
 name = "cymbal_audio"
 
 [dependencies]
+cpal = "0.16"
 crossbeam-queue = "0.3"
 cymbal-core = { path = "../core" }
