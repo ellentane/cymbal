@@ -89,11 +89,16 @@ pub fn schedule(
                 ));
             };
             let default_pitch = voice_default_pitch(*voice).unwrap_or(60);
-            let (steps, base_pitches) = bar_triggers(&bind.pattern, default_pitch)?;
+            let (steps, base_steps) = bar_triggers(
+                &bind.pattern,
+                default_pitch,
+                voice_default_pitch(*voice).is_none(),
+            )?;
             let step_samples = (bar / steps as u64).max(1);
 
             for bar_idx in 0..bars {
-                let mut steps_vec: Vec<Option<u8>> = base_pitches.clone();
+                let mut steps_vec: Vec<Option<u8>> =
+                    base_steps.iter().map(|s| s.map(|st| st.pitch)).collect();
                 for comb in &bind.combinators {
                     steps_vec = apply_combinator(comb, steps_vec, bar_idx);
                 }

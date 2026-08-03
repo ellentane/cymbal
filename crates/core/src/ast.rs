@@ -21,6 +21,7 @@ pub enum Expr {
     PatternString(String, Span),
     Notes(Vec<Note>, Span),
     Tuple(Vec<Note>, String, Span),
+    Sample(String, Span),
 }
 
 #[derive(Debug, Clone, PartialEq)]
