@@ -87,7 +87,7 @@ pub fn schedule(
             };
             let default_pitch = voice_default_pitch(*voice).unwrap_or(60);
             let (steps, base_pitches) = bar_triggers(&bind.pattern, default_pitch)?;
-            let step_samples = bar / steps as u64;
+            let step_samples = (bar / steps as u64).max(1);
 
             for bar_idx in 0..bars {
                 let mut steps_vec: Vec<Option<u8>> = base_pitches.clone();
@@ -103,10 +103,7 @@ pub fn schedule(
                     events.push(Event {
                         sample_offset: offset,
                         voice: *voice,
-                        pitch: (*voice != VoiceKind::Kick
-                            && *voice != VoiceKind::Snare
-                            && *voice != VoiceKind::Hat)
-                            .then_some(pitch),
+                        pitch: voice_default_pitch(*voice).map(|_| pitch),
                         velocity: 1.0,
                         duration: voice_default_duration(*voice),
                         generation,
@@ -211,12 +208,14 @@ mod tests {
     }
 
     #[test]
-    fn polyrhythm_phases_by_lcm() {
-        // loop a: "x . x . x . x ." = 8 steps, 4 hits/bar -> 28 hits in 7 bars;
-        // loop b: 7 steps/bar -> 7 hits, one per bar start.
-        // Exact grid relation for hats: o*7 ≡ 0 (mod 96000).
+    fn polyrhythm_phases_exact() {
+        // loop a: "x . x . x . x ." = 8 steps, 4 hits/bar -> 28 hits in 7 bars.
+        // loop b: "x . . . x . ." = 7 steps, hits at steps 0 and 4.
+        // 96000/7 truncates to 13714 (7*13714 = 95998, not 96000): the 2-sample
+        // seam per bar is deliberate integer truncation, pinned exactly here.
+        // step 4 offset = 4*13714 = 54856; each bar adds 96000.
         let tl = src2timeline(
-            "tempo 120\nlet kick = kick()\nlet hat = hat()\nloop \"a\":\n    kick << \"x . x . x . x .\"\nloop \"b\":\n    hat << \"x . . . . . .\"\n",
+            "tempo 120\nlet kick = kick()\nlet hat = hat()\nloop \"a\":\n    kick << \"x . x . x . x .\"\nloop \"b\":\n    hat << \"x . . . x . .\"\n",
             0,
             96000 * 7,
         );
@@ -232,11 +231,36 @@ mod tests {
             .filter(|e| e.voice == VoiceKind::Hat)
             .map(|e| e.sample_offset)
             .collect();
-        assert_eq!(kick.len(), 28);
-        assert_eq!(hat.len(), 7);
-        assert_eq!(kick[0], 0);
-        assert_eq!(hat[0], 0);
-        assert!(kick.iter().all(|o| o % 24000 == 0));
-        assert!(hat.iter().all(|o| (o * 7) % 96000 == 0));
+        assert_eq!(
+            kick,
+            vec![
+                0, 24000, 48000, 72000, 96000, 120000, 144000, 168000, 192000, 216000, 240000,
+                264000, 288000, 312000, 336000, 360000, 384000, 408000, 432000, 456000, 480000,
+                504000, 528000, 552000, 576000, 600000, 624000, 648000
+            ]
+        );
+        assert_eq!(
+            hat,
+            vec![
+                0, 54856, 96000, 150856, 192000, 246856, 288000, 342856, 384000, 438856, 480000,
+                534856, 576000, 630856
+            ]
+        );
+    }
+
+    #[test]
+    fn every_n_rev_flips_cycle_boundaries() {
+        // "x . x ." = 4 steps, step_samples 24000: hits at steps 0,2 -> 0, 48000.
+        // every(4) triggers on bar_idx 3; rev hits steps 1,3 -> bar_start + 24000, +72000.
+        let tl = src2timeline(
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" >> every(4, rev)\n",
+            0,
+            384000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(
+            offsets,
+            vec![0, 48000, 96000, 144000, 192000, 240000, 312000, 360000]
+        );
     }
 }
