@@ -33,6 +33,12 @@ pub fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
 }
 
 pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
+    if !samples.len().is_multiple_of(2) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "odd sample count for stereo wav",
+        ));
+    }
     let mut f = std::fs::File::create(path)?;
     f.write_all(&encode_wav(samples, sample_rate, 2))?;
     Ok(())
@@ -62,6 +68,20 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
             Span { line: 0, col: 0 },
             ErrorKind::Eval,
             "wav data chunk truncated",
+        ));
+    }
+    if !data_len.is_multiple_of(2) {
+        return Err(Error::new(
+            Span { line: 0, col: 0 },
+            ErrorKind::Eval,
+            "wav data chunk must contain whole samples",
+        ));
+    }
+    if channels == 2 && !(data_len / 2).is_multiple_of(2) {
+        return Err(Error::new(
+            Span { line: 0, col: 0 },
+            ErrorKind::Eval,
+            "wav data chunk must contain whole stereo frames",
         ));
     }
     let pcm = &bytes[44..44 + data_len];
@@ -134,5 +154,26 @@ mod tests {
     fn garbage_is_rejected() {
         assert!(decode_wav(b"not a wav").is_err());
         assert!(decode_wav(&[b'R', b'I', b'F', b'F', 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_odd_data_len() {
+        let mut wav = encode_wav(&[0.0; 3], 48000, 1);
+        wav[40..44].copy_from_slice(&7u32.to_le_bytes());
+        wav.push(0);
+        decode_wav(&wav).unwrap_err();
+    }
+
+    #[test]
+    fn stereo_decode_does_not_panic_on_odd_samples() {
+        assert!(decode_wav(&encode_wav(&[0.0, 0.5, -0.5], 48000, 2)).is_err());
+    }
+
+    #[test]
+    fn write_wav_rejects_odd_stereo_sample_count() {
+        let path = std::env::temp_dir().join(format!("cymbal_test_odd_{}.wav", std::process::id()));
+        assert!(write_wav(&path, &[0.0, 0.5, -0.5], 48000).is_err());
+        assert!(!path.exists());
+        let _ = std::fs::remove_file(&path);
     }
 }
