@@ -1,0 +1,79 @@
+use std::sync::Arc;
+
+use cymbal_core::scheduler::Timeline;
+
+#[derive(Debug)]
+pub enum Msg {
+    Swap(Arc<Timeline>),
+    Shutdown,
+}
+
+pub struct AudioQueue {
+    inner: crossbeam_queue::ArrayQueue<Msg>,
+}
+
+impl AudioQueue {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: crossbeam_queue::ArrayQueue::new(capacity),
+        }
+    }
+
+    pub fn send(&self, msg: Msg) -> Result<(), Msg> {
+        self.inner.push(msg)
+    }
+
+    pub fn recv(&self) -> Option<Msg> {
+        self.inner.pop()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use cymbal_core::scheduler::Timeline;
+
+    fn tl(generation: u64) -> Arc<Timeline> {
+        Arc::new(Timeline {
+            events: vec![],
+            generation,
+            tempo: 120.0,
+            bar_samples: 96000,
+            sample_rate: 48000,
+        })
+    }
+
+    #[test]
+    fn sends_and_receives_swap_messages() {
+        let q = AudioQueue::new(4);
+        q.send(Msg::Swap(tl(1))).unwrap();
+        q.send(Msg::Swap(tl(2))).unwrap();
+        assert!(matches!(q.recv(), Some(Msg::Swap(_))));
+        assert!(matches!(q.recv(), Some(Msg::Swap(_))));
+        assert!(q.recv().is_none());
+    }
+
+    #[test]
+    fn full_queue_rejects() {
+        let q = AudioQueue::new(1);
+        assert!(q.send(Msg::Swap(tl(1))).is_ok());
+        assert!(q.send(Msg::Swap(tl(2))).is_err());
+    }
+
+    #[test]
+    fn fifo_order_preserved() {
+        let q = AudioQueue::new(8);
+        for i in 0..5 {
+            q.send(Msg::Swap(tl(i))).unwrap();
+        }
+        let mut gens = Vec::new();
+        while let Some(m) = q.recv() {
+            if let Msg::Swap(tl) = m {
+                gens.push(tl.generation);
+            }
+        }
+        assert_eq!(gens, vec![0, 1, 2, 3, 4]);
+    }
+}
