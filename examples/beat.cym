@@ -1,11 +1,17 @@
--- beat.cym — a four-bar drum groove
+-- beat.cym — a four-bar groove with bass and lead
 tempo 120
 
 let kick = kick()
 let snare = snare()
 let hat = hat()
+let bass = bass()
+let lead = lead()
 
 loop "beat":
     kick << "x . . x . . x ."
     snare << "x . x . x . x ."
     hat  << "x x x x x x x x"
+    bass << ([c2, f2, g2], "x . . x . . . .")
+
+loop "melody":
+    lead << [c4, d4, e4, g4] >> every(4, rev)
