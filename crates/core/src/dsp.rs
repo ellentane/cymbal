@@ -45,31 +45,33 @@ pub enum Voice {
 
 impl Voice {
     pub fn new(kind: VoiceKind, pitch: Option<u8>) -> Self {
+        use crate::scheduler::voice_default_duration;
+        let dur = voice_default_duration(kind);
         match kind {
             VoiceKind::Kick => Voice::Kick(Kick {
                 t: 0,
                 phase: 0.0,
-                dur: 14400,
+                dur,
             }),
-            VoiceKind::Snare => Voice::Snare(Snare { t: 0, dur: 7200 }),
+            VoiceKind::Snare => Voice::Snare(Snare { t: 0, dur }),
             VoiceKind::Hat => Voice::Hat(Hat {
                 t: 0,
                 prev_noise: 0.0,
-                dur: 2400,
+                dur,
             }),
             VoiceKind::Bass => Voice::Bass(Bass {
                 t: 0,
                 phase: 0.0,
                 st: (0.0, 0.0, 0.0, 0.0),
                 freq: Transport::note_frequency(pitch.unwrap_or(60)),
-                dur: 14400,
+                dur,
             }),
             VoiceKind::Lead => Voice::Lead(Lead {
                 t: 0,
                 phase: 0.0,
                 st: (0.0, 0.0, 0.0, 0.0),
                 freq: Transport::note_frequency(pitch.unwrap_or(60)),
-                dur: 9600,
+                dur,
             }),
         }
     }
