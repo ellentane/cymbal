@@ -315,4 +315,45 @@ mod tests {
         assert_eq!(by_bar[2], vec![60, 64]);
         assert_eq!(by_bar[3], vec![64, 60]);
     }
+
+    #[test]
+    fn per_loop_tempo_changes_bar_length() {
+        let tl = src2timeline(
+            "tempo 120\nlet kick = kick()\nloop \"b\" tempo=240:\n    kick << \"x x x x\"\n",
+            0,
+            96000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(
+            offsets,
+            vec![0, 12000, 24000, 36000, 48000, 60000, 72000, 84000]
+        );
+    }
+
+    #[test]
+    fn loops_phase_and_realign_at_lcm() {
+        let tl = src2timeline(
+            "tempo 120\nlet kick = kick()\nlet hat = hat()\nloop \"a\":\n    kick << \"x . x .\"\nloop \"b\" tempo=240:\n    hat << \"x . . . . x .\"\n",
+            0,
+            192000,
+        );
+        let first: Vec<u64> = tl
+            .events
+            .iter()
+            .filter(|e| e.sample_offset < 96000)
+            .map(|e| e.sample_offset)
+            .collect();
+        let second: Vec<u64> = tl
+            .events
+            .iter()
+            .filter(|e| e.sample_offset >= 96000)
+            .map(|e| e.sample_offset - 96000)
+            .collect();
+        assert_eq!(
+            first, second,
+            "composite rhythm must repeat every lcm samples"
+        );
+        assert_eq!(first, vec![0, 0, 34285, 48000, 48000, 82285]);
+        assert_eq!(tl.events.iter().filter(|e| e.sample_offset == 0).count(), 2);
+    }
 }
