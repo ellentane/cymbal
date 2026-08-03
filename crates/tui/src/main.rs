@@ -1,3 +1,5 @@
+mod editor;
+
 use std::path::Path;
 use std::process::ExitCode;
 
