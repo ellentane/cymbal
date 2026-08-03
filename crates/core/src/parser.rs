@@ -170,10 +170,7 @@ impl<'a> Parser<'a> {
         let mut vel = None;
         let mut delay_send = None;
         let mut reverb_send = None;
-        loop {
-            let TokenKind::Ident(name) = self.peek_kind().clone() else {
-                break;
-            };
+        while let TokenKind::Ident(name) = self.peek_kind().clone() {
             let param = match name.as_str() {
                 "pan" | "vel" | "delay" | "reverb" => {
                     let pspan = self.span();
@@ -215,20 +212,27 @@ impl<'a> Parser<'a> {
             }
             *slot = Some(n as f32);
         }
-        if let Some(p) = pan {
-            if !(-1.0..=1.0).contains(&p) {
-                return Err(Error::new(span, ErrorKind::Parse, "pan must be in -1..=1"));
-            }
+        if self.peek_kind() == &TokenKind::Pipe {
+            return Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "parameters must come after combinators",
+            ));
+        }
+        if let Some(p) = pan
+            && !(-1.0..=1.0).contains(&p)
+        {
+            return Err(Error::new(span, ErrorKind::Parse, "pan must be in -1..=1"));
         }
         for (name, v) in [("vel", vel), ("delay", delay_send), ("reverb", reverb_send)] {
-            if let Some(v) = v {
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(Error::new(
-                        span,
-                        ErrorKind::Parse,
-                        format!("{name} must be in 0..=1"),
-                    ));
-                }
+            if let Some(v) = v
+                && !(0.0..=1.0).contains(&v)
+            {
+                return Err(Error::new(
+                    span,
+                    ErrorKind::Parse,
+                    format!("{name} must be in 0..=1"),
+                ));
             }
         }
         Ok(BindStmt {
@@ -599,6 +603,7 @@ loop "beat" tempo=90:
         let err =
             parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5 pan=0.6\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.message, "duplicate parameter 'pan'");
     }
 
     #[test]
@@ -627,5 +632,41 @@ loop "beat" tempo=90:
     fn unknown_param_is_parse_error() {
         let err = parse(&lex("loop \"a\":\n    kick << \"x\" foo=1\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn sample_missing_path_is_parse_error() {
+        let err = parse(&lex("loop \"a\":\n    sample << \"x\"\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn param_without_value_is_parse_error() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" pan=\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn param_boundary_values_are_accepted() {
+        for src in [
+            "loop \"a\":\n    kick << \"x\" pan=1.0\n",
+            "loop \"a\":\n    kick << \"x\" pan=-1.0\n",
+            "loop \"a\":\n    kick << \"x\" vel=1.0\n",
+            "loop \"a\":\n    kick << \"x\" reverb=0\n",
+        ] {
+            let program = parse(&lex(src).unwrap()).unwrap();
+            let Stmt::Loop(l) = &program.statements[0] else {
+                panic!()
+            };
+            assert_eq!(l.binds.len(), 1, "source: {src}");
+        }
+    }
+
+    #[test]
+    fn params_before_combinator_is_parse_error() {
+        let err =
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5 >> rev\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.message, "parameters must come after combinators");
     }
 }
