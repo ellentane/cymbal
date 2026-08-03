@@ -10,11 +10,13 @@ renderer, and WAV export.
 
 ```sh
 cargo run --release -- examples/beat.cym    # live TUI
-cargo run --release -- render examples/beat.cym out.wav   # offline render to WAV
+cargo run --release -- render examples/beat.cym out.wav   # offline render to WAV (120 s by default)
 ```
 
 Open any `.cym` file to start the live editor. Errors are shown inline and
-playback always continues with the last good schedule.
+playback always continues with the last good schedule. `make play` / `make
+export` are shortcuts for the examples above; `render` also accepts a length in
+seconds: `cargo run --release -- render examples/groove.cym groove.wav 30`.
 
 ## Language cheat sheet
 

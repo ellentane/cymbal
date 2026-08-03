@@ -30,6 +30,7 @@ use status::Status;
 
 const MAX_SAMPLES: u64 = 3600 * 48000;
 const SAMPLE_RATE: u32 = 48000;
+const RENDER_DEFAULT_SECONDS: u64 = 120;
 
 enum UiMsg {
     Err(Error),
@@ -42,10 +43,15 @@ pub fn build_timeline(src: &str, sample_rate: u32) -> Result<Timeline, Error> {
     cymbal_core::scheduler::schedule(&program, 0, MAX_SAMPLES, sample_rate)
 }
 
-fn render_to_wav(input: &std::path::Path, output: &std::path::Path) -> Result<(), String> {
+fn render_to_wav(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    seconds: u64,
+) -> Result<(), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let samples = cymbal_core::render::render_offline(&src, MAX_SAMPLES, SAMPLE_RATE)
+    let max_samples = seconds.saturating_mul(SAMPLE_RATE as u64).min(MAX_SAMPLES);
+    let samples = cymbal_core::render::render_offline(&src, max_samples, SAMPLE_RATE)
         .map_err(|e| format!("render failed: {e}"))?;
     cymbal_core::wav::write_wav(output, &samples, SAMPLE_RATE)
         .map_err(|e| format!("cannot write {}: {e}", output.display()))
@@ -67,7 +73,11 @@ fn main() -> std::process::ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["render", input, output] => {
-            match render_to_wav(std::path::Path::new(input), std::path::Path::new(output)) {
+            match render_to_wav(
+                std::path::Path::new(input),
+                std::path::Path::new(output),
+                RENDER_DEFAULT_SECONDS,
+            ) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(msg) => {
                     eprintln!("{msg}");
@@ -75,6 +85,21 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
+        ["render", input, output, seconds] => match seconds.parse::<u64>() {
+            Ok(s) if s > 0 => {
+                match render_to_wav(std::path::Path::new(input), std::path::Path::new(output), s) {
+                    Ok(()) => std::process::ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        std::process::ExitCode::FAILURE
+                    }
+                }
+            }
+            _ => {
+                eprintln!("invalid seconds: {seconds}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         [file] => match run_tui(std::path::Path::new(file)) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(msg) => {
@@ -83,7 +108,9 @@ fn main() -> std::process::ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: cymbal <file.cym>\n       cymbal render <in.cym> <out.wav>");
+            eprintln!(
+                "usage: cymbal <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]"
+            );
             std::process::ExitCode::from(2)
         }
     }
@@ -311,6 +338,26 @@ mod tests {
     fn invalid_source_reports_error() {
         let err = build_timeline("loop \"b\":\n    kick << \"x y\"\n", 48000).unwrap_err();
         assert!(err.message.contains("pattern"));
+    }
+
+    #[test]
+    fn render_seconds_sets_wav_length() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("cymbal_test_src_{}.cym", std::process::id()));
+        let out_path = dir.join(format!("cymbal_test_out_{}.wav", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&src_path).unwrap();
+            write!(
+                f,
+                "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n"
+            )
+            .unwrap();
+        }
+        render_to_wav(&src_path, &out_path, 1).unwrap();
+        assert_eq!(std::fs::metadata(&out_path).unwrap().len(), 48000 * 2 + 44);
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&out_path);
     }
 
     #[test]
