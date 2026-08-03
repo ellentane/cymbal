@@ -1,0 +1,19 @@
+-- groove.cym — syncopated two-loop groove
+tempo 116
+
+let kick = kick()
+let snare = snare()
+let hat  = hat()
+let bass = bass()
+let lead = lead()
+
+loop "drums":
+    kick  << "x . . x . x . ."
+    snare << "x . x . x . x ."
+    hat   << "x . x x . x x x"
+
+loop "low":
+    bass << ([c2, c2, f2, g2], "x . . . . . . .")
+
+loop "air":
+    lead << [c5, bb4, g4, f4] >> every(3, rev)

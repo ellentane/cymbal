@@ -31,6 +31,11 @@ use status::Status;
 const MAX_SAMPLES: u64 = 3600 * 48000;
 const SAMPLE_RATE: u32 = 48000;
 
+enum UiMsg {
+    Err(Error),
+    Info(String),
+}
+
 pub fn build_timeline(src: &str, sample_rate: u32) -> Result<Timeline, Error> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
@@ -100,7 +105,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
         }
     };
 
-    let (err_tx, err_rx) = mpsc::channel::<Error>();
+    let (msg_tx, msg_rx) = mpsc::channel::<UiMsg>();
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut stdout = io::stdout();
@@ -122,30 +127,70 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                         KeyCode::Char('s') => {
                             let src = editor.content();
                             let queue = queue.clone();
-                            let tx = err_tx.clone();
+                            let tx = msg_tx.clone();
                             std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
                                 Ok(tl) => {
                                     let _ = queue.send(Msg::Swap(Arc::new(tl)));
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(e);
+                                    let _ = tx.send(UiMsg::Err(e));
                                 }
                             });
                             status.clear_error();
                             status.message = "reloading...".into();
                         }
                         KeyCode::Char('q') => break,
+                        KeyCode::Char('e') => {
+                            let src = editor.content();
+                            let out_path = file
+                                .parent()
+                                .map(|p| p.join("out.wav"))
+                                .unwrap_or_else(|| std::path::PathBuf::from("out.wav"));
+                            let tx = msg_tx.clone();
+                            std::thread::spawn(move || {
+                                match cymbal_core::render::render_offline(
+                                    &src,
+                                    MAX_SAMPLES,
+                                    SAMPLE_RATE,
+                                ) {
+                                    Ok(samples) => {
+                                        match cymbal_core::wav::write_wav(
+                                            &out_path,
+                                            &samples,
+                                            SAMPLE_RATE,
+                                        ) {
+                                            Ok(()) => {
+                                                let _ = tx.send(UiMsg::Info(format!(
+                                                    "exported {}",
+                                                    out_path.display()
+                                                )));
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(UiMsg::Err(Error::new(
+                                                    cymbal_core::error::Span { line: 0, col: 0 },
+                                                    cymbal_core::error::ErrorKind::Io,
+                                                    format!("export failed: {e}"),
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(UiMsg::Err(e));
+                                    }
+                                }
+                            });
+                        }
                         KeyCode::Char('=') => {
                             status.raise_tempo();
                             let src = apply_tempo_override(&editor.content(), status.tempo);
                             let queue = queue.clone();
-                            let tx = err_tx.clone();
+                            let tx = msg_tx.clone();
                             std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
                                 Ok(tl) => {
                                     let _ = queue.send(Msg::Swap(Arc::new(tl)));
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(e);
+                                    let _ = tx.send(UiMsg::Err(e));
                                 }
                             });
                         }
@@ -153,13 +198,13 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             status.lower_tempo();
                             let src = apply_tempo_override(&editor.content(), status.tempo);
                             let queue = queue.clone();
-                            let tx = err_tx.clone();
+                            let tx = msg_tx.clone();
                             std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
                                 Ok(tl) => {
                                     let _ = queue.send(Msg::Swap(Arc::new(tl)));
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(e);
+                                    let _ = tx.send(UiMsg::Err(e));
                                 }
                             });
                         }
@@ -180,8 +225,14 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                     }
                 }
             }
-            if let Ok(e) = err_rx.try_recv() {
-                status.set_error(e.to_string());
+            if let Ok(msg) = msg_rx.try_recv() {
+                match msg {
+                    UiMsg::Err(e) => status.set_error(e.to_string()),
+                    UiMsg::Info(s) => {
+                        status.clear_error();
+                        status.message = s;
+                    }
+                }
             }
             terminal.draw(|f| {
                 let chunks = Layout::default()
@@ -260,5 +311,19 @@ mod tests {
     fn invalid_source_reports_error() {
         let err = build_timeline("loop \"b\":\n    kick << \"x y\"\n", 48000).unwrap_err();
         assert!(err.message.contains("pattern"));
+    }
+
+    #[test]
+    fn tempo_override_inserts_and_replaces() {
+        let src = "let kick = kick()\nloop \"b\":\n    kick << \"x\"\n";
+        assert_eq!(
+            apply_tempo_override(src, 130.0),
+            "tempo 130\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n"
+        );
+        let src2 = "tempo 90\nlet kick = kick()\n";
+        assert_eq!(
+            apply_tempo_override(src2, 130.0),
+            "tempo 130\nlet kick = kick()\n"
+        );
     }
 }
