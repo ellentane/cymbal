@@ -1,0 +1,11 @@
+-- beat.cym — a four-bar drum groove
+tempo 120
+
+let kick = kick()
+let snare = snare()
+let hat = hat()
+
+loop "beat":
+    kick << "x . . x . . x ."
+    snare << "x . x . x . x ."
+    hat  << "x x x x x x x x"

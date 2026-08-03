@@ -9,3 +9,4 @@ name = "cymbal"
 path = "src/main.rs"
 
 [dependencies]
+cymbal-core = { path = "../core" }
