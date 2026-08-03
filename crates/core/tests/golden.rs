@@ -13,7 +13,7 @@ fn decode_pcm16(wav: &[u8]) -> Vec<i16> {
 }
 
 fn assert_audio_matches(rendered: &[f32], golden: &[u8]) {
-    let rendered = encode_wav(rendered, 48000);
+    let rendered = encode_wav(rendered, 48000, 1);
     let rendered = decode_pcm16(&rendered);
     let golden = decode_pcm16(golden);
     assert_eq!(rendered.len(), golden.len(), "sample count mismatch");
