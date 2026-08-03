@@ -263,4 +263,56 @@ mod tests {
             vec![0, 48000, 96000, 144000, 192000, 240000, 312000, 360000]
         );
     }
+
+    #[test]
+    fn rev_reverses_pitches_within_bar() {
+        let tl = src2timeline(
+            "let lead = lead()\nloop \"b\":\n    lead << [c4, e4, g4] >> rev\n",
+            0,
+            96000,
+        );
+        let pitches: Vec<Option<u8>> = tl
+            .events
+            .iter()
+            .filter(|e| e.voice == VoiceKind::Lead)
+            .map(|e| e.pitch)
+            .collect();
+        assert_eq!(pitches, vec![Some(67), Some(64), Some(60)]);
+    }
+
+    #[test]
+    fn rev_reverses_rhythm() {
+        let tl = src2timeline(
+            "let kick = kick()\nloop \"b\":\n    kick << \". x . x\" >> rev\n",
+            0,
+            96000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(offsets, vec![0, 48000]);
+    }
+
+    #[test]
+    fn every_n_rev_applies_on_nth_cycle() {
+        let tl = src2timeline(
+            "let lead = lead()\nloop \"b\":\n    lead << [c4, e4] >> every(2, rev)\n",
+            0,
+            96000 * 4,
+        );
+        let by_bar: Vec<Vec<u8>> = tl
+            .events
+            .iter()
+            .filter(|e| e.voice == VoiceKind::Lead)
+            .fold(
+                vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+                |mut acc, e| {
+                    let bar = (e.sample_offset / 96000) as usize;
+                    acc[bar].push(e.pitch.unwrap());
+                    acc
+                },
+            );
+        assert_eq!(by_bar[0], vec![60, 64]); // cycle 1: normal
+        assert_eq!(by_bar[1], vec![64, 60]); // cycle 2: reversed
+        assert_eq!(by_bar[2], vec![60, 64]);
+        assert_eq!(by_bar[3], vec![64, 60]);
+    }
 }
