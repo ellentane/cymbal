@@ -129,6 +129,8 @@ impl Lexer {
                             }
                             self.bump();
                         }
+                    } else if self.peek2().is_some_and(|(c2, _)| c2.is_ascii_digit()) {
+                        return self.lex_number(span);
                     } else {
                         return Err(Error::new(span, ErrorKind::Lex, "unexpected character '-'"));
                     }
@@ -240,6 +242,10 @@ impl Lexer {
 
     fn lex_number(&mut self, span: Span) -> Result<Token> {
         let mut s = String::new();
+        if self.peek().is_some_and(|(c, _)| c == '-') {
+            s.push('-');
+            self.bump();
+        }
         while let Some((c, _)) = self.peek() {
             if c.is_ascii_digit() || c == '.' {
                 s.push(c);

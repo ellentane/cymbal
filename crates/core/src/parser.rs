@@ -166,10 +166,79 @@ impl<'a> Parser<'a> {
             self.advance();
             combinators.push(self.parse_combinator()?);
         }
+        let mut pan = None;
+        let mut vel = None;
+        let mut delay_send = None;
+        let mut reverb_send = None;
+        loop {
+            let TokenKind::Ident(name) = self.peek_kind().clone() else {
+                break;
+            };
+            let param = match name.as_str() {
+                "pan" | "vel" | "delay" | "reverb" => {
+                    let pspan = self.span();
+                    self.advance();
+                    if self.peek_kind() != &TokenKind::Assign {
+                        return Err(Error::new(
+                            self.span(),
+                            ErrorKind::Parse,
+                            "expected '=' after parameter",
+                        ));
+                    }
+                    self.advance();
+                    let TokenKind::Number(n) = self.peek_kind().clone() else {
+                        return Err(Error::new(
+                            self.span(),
+                            ErrorKind::Parse,
+                            "expected number after parameter",
+                        ));
+                    };
+                    self.advance();
+                    (name.as_str().to_string(), n, pspan)
+                }
+                _ => break,
+            };
+            let (name, n, pspan) = param;
+            let slot = match name.as_str() {
+                "pan" => &mut pan,
+                "vel" => &mut vel,
+                "delay" => &mut delay_send,
+                "reverb" => &mut reverb_send,
+                _ => unreachable!(),
+            };
+            if slot.is_some() {
+                return Err(Error::new(
+                    pspan,
+                    ErrorKind::Parse,
+                    format!("duplicate parameter '{name}'"),
+                ));
+            }
+            *slot = Some(n as f32);
+        }
+        if let Some(p) = pan {
+            if !(-1.0..=1.0).contains(&p) {
+                return Err(Error::new(span, ErrorKind::Parse, "pan must be in -1..=1"));
+            }
+        }
+        for (name, v) in [("vel", vel), ("delay", delay_send), ("reverb", reverb_send)] {
+            if let Some(v) = v {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(Error::new(
+                        span,
+                        ErrorKind::Parse,
+                        format!("{name} must be in 0..=1"),
+                    ));
+                }
+            }
+        }
         Ok(BindStmt {
             voice,
             pattern,
             combinators,
+            pan,
+            vel,
+            delay_send,
+            reverb_send,
             span,
         })
     }
@@ -240,6 +309,17 @@ impl<'a> Parser<'a> {
         match self.peek_kind().clone() {
             TokenKind::Ident(name) => {
                 self.advance();
+                if name == "sample" {
+                    let TokenKind::String(path) = self.peek_kind().clone() else {
+                        return Err(Error::new(
+                            self.span(),
+                            ErrorKind::Parse,
+                            "expected path string after 'sample'",
+                        ));
+                    };
+                    self.advance();
+                    return Ok(Expr::Sample(path, span));
+                }
                 if self.peek_kind() == &TokenKind::LParen {
                     self.advance();
                     if self.peek_kind() != &TokenKind::RParen {
@@ -484,5 +564,68 @@ loop "beat" tempo=90:
             panic!("expected let")
         };
         assert_eq!(name, "y");
+    }
+
+    #[test]
+    fn parses_sample_voice_and_params() {
+        let src = "loop \"a\":\n    sample \"kick.wav\" << \"x . x .\" pan=0.7 vel=0.9 delay=0.3 reverb=0.2\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert_eq!(
+            l.binds[0].voice,
+            Expr::Sample("kick.wav".into(), Span { line: 2, col: 5 })
+        );
+        assert_eq!(l.binds[0].pan, Some(0.7));
+        assert_eq!(l.binds[0].vel, Some(0.9));
+        assert_eq!(l.binds[0].delay_send, Some(0.3));
+        assert_eq!(l.binds[0].reverb_send, Some(0.2));
+    }
+
+    #[test]
+    fn params_after_combinators() {
+        let src = "loop \"a\":\n    kick << \"x . x .\" >> every(2, rev) pan=-0.5\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert_eq!(l.binds[0].combinators.len(), 1);
+        assert_eq!(l.binds[0].pan, Some(-0.5));
+    }
+
+    #[test]
+    fn duplicate_param_is_error() {
+        let err =
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5 pan=0.6\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn out_of_range_params_are_errors() {
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=2.0\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" vel=1.5\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" delay=-0.1\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+    }
+
+    #[test]
+    fn unknown_param_is_parse_error() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" foo=1\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
     }
 }

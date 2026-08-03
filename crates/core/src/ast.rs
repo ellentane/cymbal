@@ -35,6 +35,10 @@ pub struct BindStmt {
     pub voice: Expr,
     pub pattern: Expr,
     pub combinators: Vec<Combinator>,
+    pub pan: Option<f32>,
+    pub vel: Option<f32>,
+    pub delay_send: Option<f32>,
+    pub reverb_send: Option<f32>,
     pub span: Span,
 }
 
