@@ -30,6 +30,16 @@ impl AudioError {
 
 pub struct AudioHandle {
     _stream: cpal::Stream,
+    pub latency_ms: Option<f32>,
+}
+
+pub fn buffer_latency_ms(config: &cpal::StreamConfig) -> Option<f32> {
+    match config.buffer_size {
+        cpal::BufferSize::Fixed(frames) => {
+            Some(frames as f32 / config.sample_rate.0 as f32 * 1000.0)
+        }
+        cpal::BufferSize::Default => None,
+    }
 }
 
 pub fn start_audio(
@@ -88,12 +98,35 @@ pub fn start_audio(
     stream
         .play()
         .map_err(|e| AudioError::StreamError(e.to_string()))?;
-    Ok(AudioHandle { _stream: stream })
+    Ok(AudioHandle {
+        _stream: stream,
+        latency_ms: buffer_latency_ms(&stream_config),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffer_latency_ms_from_fixed_buffer() {
+        let cfg = cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Fixed(256),
+        };
+        assert_eq!(buffer_latency_ms(&cfg), Some(5.3333335));
+    }
+
+    #[test]
+    fn buffer_latency_ms_none_for_default_buffer() {
+        let cfg = cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        assert_eq!(buffer_latency_ms(&cfg), None);
+    }
 
     #[test]
     fn maps_cpal_errors_to_audio_kind() {

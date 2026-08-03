@@ -37,6 +37,7 @@ pub struct Timeline {
     pub tempo: f64,
     pub bar_samples: u64,
     pub sample_rate: u32,
+    pub loops: Vec<String>,
 }
 
 pub fn schedule(
@@ -60,6 +61,7 @@ pub fn schedule(
     let transport_bar = transport.bar_samples();
 
     let mut events = Vec::new();
+    let mut loops = Vec::new();
     let mut seen_loops = std::collections::HashSet::new();
 
     for stmt in &program.statements {
@@ -73,6 +75,7 @@ pub fn schedule(
                 format!("duplicate loop name '{}'", loop_stmt.name),
             ));
         }
+        loops.push(loop_stmt.name.clone());
         let loop_tempo = loop_stmt.tempo.unwrap_or(tempo);
         let bar = Transport::new(loop_tempo, sample_rate).bar_samples();
         let bars = max_samples.div_ceil(bar);
@@ -119,6 +122,7 @@ pub fn schedule(
         tempo,
         bar_samples: transport_bar,
         sample_rate,
+        loops,
     })
 }
 
@@ -314,6 +318,16 @@ mod tests {
         assert_eq!(by_bar[1], vec![64, 60]); // cycle 2: reversed
         assert_eq!(by_bar[2], vec![60, 64]);
         assert_eq!(by_bar[3], vec![64, 60]);
+    }
+
+    #[test]
+    fn timeline_records_loop_names_in_order() {
+        let tl = src2timeline(
+            "let kick = kick()\nlet hat = hat()\nloop \"b\":\n    kick << \"x . x .\"\nloop \"h\":\n    hat << \"x x x x\"\n",
+            0,
+            96000,
+        );
+        assert_eq!(tl.loops, vec!["b".to_string(), "h".to_string()]);
     }
 
     #[test]

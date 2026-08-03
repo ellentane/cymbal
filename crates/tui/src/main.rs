@@ -35,6 +35,18 @@ const RENDER_DEFAULT_SECONDS: u64 = 120;
 enum UiMsg {
     Err(Error),
     Info(String),
+    Loops(Vec<String>),
+}
+
+fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
+    match msg {
+        UiMsg::Err(e) => status.set_error(e.to_string()),
+        UiMsg::Info(s) => {
+            status.clear_error();
+            status.message = s;
+        }
+        UiMsg::Loops(loops) => status.loops = loops,
+    }
 }
 
 pub fn build_timeline(src: &str, sample_rate: u32) -> Result<Timeline, Error> {
@@ -123,7 +135,8 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
     let queue = Arc::new(AudioQueue::new(16));
     let initial = build_timeline(&src, SAMPLE_RATE).map_err(|e| e.to_string())?;
     let mut status = Status::new();
-    let _handle = match cymbal_audio::stream::start_audio(queue.clone(), Arc::new(initial), |_e| {})
+    status.loops = initial.loops.clone();
+    let handle = match cymbal_audio::stream::start_audio(queue.clone(), Arc::new(initial), |_e| {})
     {
         Ok(h) => Some(h),
         Err(e) => {
@@ -131,6 +144,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
             None
         }
     };
+    status.latency_ms = handle.as_ref().and_then(|h| h.latency_ms);
 
     let (msg_tx, msg_rx) = mpsc::channel::<UiMsg>();
 
@@ -157,6 +171,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let tx = msg_tx.clone();
                             std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
                                 Ok(tl) => {
+                                    let _ = tx.send(UiMsg::Loops(tl.loops.clone()));
                                     let _ = queue.send(Msg::Swap(Arc::new(tl)));
                                 }
                                 Err(e) => {
@@ -214,6 +229,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let tx = msg_tx.clone();
                             std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
                                 Ok(tl) => {
+                                    let _ = tx.send(UiMsg::Loops(tl.loops.clone()));
                                     let _ = queue.send(Msg::Swap(Arc::new(tl)));
                                 }
                                 Err(e) => {
@@ -228,6 +244,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let tx = msg_tx.clone();
                             std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
                                 Ok(tl) => {
+                                    let _ = tx.send(UiMsg::Loops(tl.loops.clone()));
                                     let _ = queue.send(Msg::Swap(Arc::new(tl)));
                                 }
                                 Err(e) => {
@@ -253,13 +270,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                 }
             }
             if let Ok(msg) = msg_rx.try_recv() {
-                match msg {
-                    UiMsg::Err(e) => status.set_error(e.to_string()),
-                    UiMsg::Info(s) => {
-                        status.clear_error();
-                        status.message = s;
-                    }
-                }
+                apply_ui_msg(&mut status, msg);
             }
             terminal.draw(|f| {
                 let chunks = Layout::default()
@@ -300,13 +311,8 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                         .block(Block::default().borders(Borders::ALL).title("cymbal")),
                     chunks[0],
                 );
-                let err = status
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| status.message.clone());
-                let status_line = format!("tempo {} | bar {} | {}", status.tempo, status.bar, err);
                 f.render_widget(
-                    Paragraph::new(status_line).block(Block::default().borders(Borders::ALL)),
+                    Paragraph::new(status.render()).block(Block::default().borders(Borders::ALL)),
                     chunks[1],
                 );
             })?;
@@ -372,5 +378,22 @@ mod tests {
             apply_tempo_override(src2, 130.0),
             "tempo 130\nlet kick = kick()\n"
         );
+    }
+
+    #[test]
+    fn apply_ui_msg_sets_loops_from_swap() {
+        let mut status = Status::new();
+        apply_ui_msg(&mut status, UiMsg::Loops(vec!["b".into(), "h".into()]));
+        assert_eq!(status.loops, vec!["b".to_string(), "h".to_string()]);
+        assert_eq!(status.error, None);
+    }
+
+    #[test]
+    fn apply_ui_msg_info_clears_error() {
+        let mut status = Status::new();
+        status.set_error("boom".into());
+        apply_ui_msg(&mut status, UiMsg::Info("exported out.wav".into()));
+        assert_eq!(status.error, None);
+        assert_eq!(status.message, "exported out.wav");
     }
 }
