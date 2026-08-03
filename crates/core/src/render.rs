@@ -7,7 +7,13 @@ use crate::scheduler::schedule;
 pub fn render_offline(src: &str, max_samples: u64, sample_rate: u32) -> Result<Vec<f32>> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
-    let timeline = schedule(&program, 0, max_samples, sample_rate)?;
+    let timeline = schedule(
+        &program,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        max_samples,
+        sample_rate,
+    )?;
     let mut out = vec![0.0f32; max_samples as usize];
     for ev in &timeline.events {
         let mut voice = Voice::new(ev.voice, ev.pitch);

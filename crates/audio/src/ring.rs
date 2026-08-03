@@ -43,6 +43,7 @@ mod tests {
             bar_samples: 96000,
             sample_rate: 48000,
             loops: vec![],
+            loop_generations: vec![],
         })
     }
 

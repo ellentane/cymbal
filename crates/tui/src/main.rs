@@ -52,7 +52,13 @@ fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
 pub fn build_timeline(src: &str, sample_rate: u32) -> Result<Timeline, Error> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
-    cymbal_core::scheduler::schedule(&program, 0, MAX_SAMPLES, sample_rate)
+    cymbal_core::scheduler::schedule(
+        &program,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        MAX_SAMPLES,
+        sample_rate,
+    )
 }
 
 fn render_to_wav(

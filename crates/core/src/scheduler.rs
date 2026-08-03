@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::ast::{Combinator, Expr, Program, Stmt, VoiceKind};
 use crate::error::{Error, ErrorKind, Result};
+use crate::pattern;
 use crate::pattern::bar_triggers;
 use crate::transport::Transport;
 
@@ -10,6 +14,7 @@ pub fn voice_default_duration(kind: VoiceKind) -> u64 {
         VoiceKind::Hat => 2400,
         VoiceKind::Bass => 14400,
         VoiceKind::Lead => 9600,
+        VoiceKind::Sample => 0,
     }
 }
 
@@ -17,17 +22,30 @@ pub fn voice_default_pitch(kind: VoiceKind) -> Option<u8> {
     match kind {
         VoiceKind::Kick | VoiceKind::Snare | VoiceKind::Hat => None,
         VoiceKind::Bass | VoiceKind::Lead => Some(60),
+        VoiceKind::Sample => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampleData {
+    pub frames: Arc<Vec<f32>>,
+    pub sample_rate: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub sample_offset: u64,
+    pub loop_name: String,
     pub voice: VoiceKind,
     pub pitch: Option<u8>,
+    pub semitone: i32,
     pub velocity: f32,
     pub duration: u64,
     pub generation: u64,
+    pub pan: f32,
+    pub delay_send: f32,
+    pub reverb_send: f32,
+    pub sample: Option<Arc<SampleData>>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,11 +56,13 @@ pub struct Timeline {
     pub bar_samples: u64,
     pub sample_rate: u32,
     pub loops: Vec<String>,
+    pub loop_generations: Vec<(String, u64)>,
 }
 
 pub fn schedule(
     program: &Program,
-    generation: u64,
+    loop_generations: &HashMap<String, u64>,
+    samples: &HashMap<String, Arc<SampleData>>,
     max_samples: u64,
     sample_rate: u32,
 ) -> Result<Timeline> {
@@ -62,6 +82,8 @@ pub fn schedule(
 
     let mut events = Vec::new();
     let mut loops = Vec::new();
+    let mut loop_gens = Vec::new();
+    let mut max_generation = 0;
     let mut seen_loops = std::collections::HashSet::new();
 
     for stmt in &program.statements {
@@ -75,46 +97,82 @@ pub fn schedule(
                 format!("duplicate loop name '{}'", loop_stmt.name),
             ));
         }
+        let generation = loop_generations
+            .get(&loop_stmt.name)
+            .copied()
+            .unwrap_or(max_generation + 1);
+        max_generation = max_generation.max(generation);
         loops.push(loop_stmt.name.clone());
+        loop_gens.push((loop_stmt.name.clone(), generation));
         let loop_tempo = loop_stmt.tempo.unwrap_or(tempo);
         let bar = Transport::new(loop_tempo, sample_rate).bar_samples();
         let bars = max_samples.div_ceil(bar);
 
         for bind in &loop_stmt.binds {
-            let Expr::Voice(voice, _) = &bind.voice else {
-                return Err(Error::new(
-                    bind.span,
-                    ErrorKind::Eval,
-                    "left side of '<<' must be a voice",
-                ));
+            let (voice, is_sample, sample_data) = match &bind.voice {
+                Expr::Voice(voice, _) => (*voice, false, None),
+                Expr::Sample(path, span) => {
+                    let data = samples.get(path).ok_or_else(|| {
+                        Error::new(
+                            *span,
+                            ErrorKind::Eval,
+                            format!("sample '{path}' not loaded"),
+                        )
+                    })?;
+                    (VoiceKind::Sample, true, Some(data.clone()))
+                }
+                _ => {
+                    return Err(Error::new(
+                        bind.span,
+                        ErrorKind::Eval,
+                        "left side of '<<' must be a voice",
+                    ));
+                }
             };
-            let default_pitch = voice_default_pitch(*voice).unwrap_or(60);
-            let (steps, base_steps) = bar_triggers(
-                &bind.pattern,
-                default_pitch,
-                voice_default_pitch(*voice).is_none(),
-            )?;
+            let default_pitch = voice_default_pitch(voice).unwrap_or(60);
+            let (steps, step_list) = bar_triggers(&bind.pattern, default_pitch, is_sample)?;
             let step_samples = (bar / steps as u64).max(1);
 
             for bar_idx in 0..bars {
-                let mut steps_vec: Vec<Option<u8>> =
-                    base_steps.iter().map(|s| s.map(|st| st.pitch)).collect();
+                let mut steps_vec: Vec<Option<pattern::Step>> = step_list.clone();
                 for comb in &bind.combinators {
                     steps_vec = apply_combinator(comb, steps_vec, bar_idx);
                 }
-                for (step_idx, pitch) in steps_vec.into_iter().enumerate() {
-                    let Some(pitch) = pitch else { continue };
+                for (step_idx, step) in steps_vec.into_iter().enumerate() {
+                    let Some(step) = step else { continue };
                     let offset = bar_idx * bar + step_idx as u64 * step_samples;
                     if offset >= max_samples {
                         continue;
                     }
+                    let velocity = (step.velocity * bind.vel.unwrap_or(1.0)).clamp(0.0, 1.0);
+                    let duration = match voice {
+                        VoiceKind::Sample => {
+                            let data = sample_data.as_ref().unwrap();
+                            let rate = 2f64.powf(step.semitone as f64 / 12.0);
+                            ((data.frames.len() as f64 * sample_rate as f64
+                                / data.sample_rate as f64)
+                                / rate)
+                                .ceil() as u64
+                        }
+                        _ => voice_default_duration(voice),
+                    };
                     events.push(Event {
                         sample_offset: offset,
-                        voice: *voice,
-                        pitch: voice_default_pitch(*voice).map(|_| pitch),
-                        velocity: 1.0,
-                        duration: voice_default_duration(*voice),
+                        loop_name: loop_stmt.name.clone(),
+                        voice,
+                        pitch: if voice == VoiceKind::Sample {
+                            None
+                        } else {
+                            voice_default_pitch(voice).map(|_| step.pitch)
+                        },
+                        semitone: step.semitone,
+                        velocity,
+                        duration,
                         generation,
+                        pan: bind.pan.unwrap_or(0.0),
+                        delay_send: bind.delay_send.unwrap_or(0.0),
+                        reverb_send: bind.reverb_send.unwrap_or(0.0),
+                        sample: sample_data.clone(),
                     });
                 }
             }
@@ -123,15 +181,35 @@ pub fn schedule(
     events.sort_by_key(|e| e.sample_offset);
     Ok(Timeline {
         events,
-        generation,
+        generation: max_generation,
         tempo,
         bar_samples: transport_bar,
         sample_rate,
         loops,
+        loop_generations: loop_gens,
     })
 }
 
-fn apply_combinator(comb: &Combinator, steps: Vec<Option<u8>>, bar_idx: u64) -> Vec<Option<u8>> {
+pub fn sample_paths(program: &Program) -> Vec<String> {
+    let mut out = Vec::new();
+    for stmt in &program.statements {
+        let Stmt::Loop(l) = stmt else { continue };
+        for bind in &l.binds {
+            if let Expr::Sample(path, _) = &bind.voice
+                && !out.contains(path)
+            {
+                out.push(path.clone());
+            }
+        }
+    }
+    out
+}
+
+fn apply_combinator(
+    comb: &Combinator,
+    steps: Vec<Option<pattern::Step>>,
+    bar_idx: u64,
+) -> Vec<Option<pattern::Step>> {
     match comb {
         Combinator::Rev => steps.into_iter().rev().collect(),
         Combinator::Every(n, inner) => {
@@ -152,7 +230,30 @@ mod tests {
 
     fn src2timeline(src: &str, generation: u64, max_samples: u64) -> Timeline {
         let program = parse(&lex(src).unwrap()).unwrap();
-        schedule(&program, generation, max_samples, 48000).unwrap()
+        let mut loop_generations = HashMap::new();
+        for stmt in &program.statements {
+            if let Stmt::Loop(loop_stmt) = stmt {
+                loop_generations.insert(loop_stmt.name.clone(), generation);
+            }
+        }
+        schedule(
+            &program,
+            &loop_generations,
+            &HashMap::new(),
+            max_samples,
+            48000,
+        )
+        .unwrap()
+    }
+
+    fn src2timeline_v11(
+        src: &str,
+        loop_generations: &HashMap<String, u64>,
+        samples: &HashMap<String, Arc<SampleData>>,
+        max_samples: u64,
+    ) -> Timeline {
+        let program = parse(&lex(src).unwrap()).unwrap();
+        schedule(&program, loop_generations, samples, max_samples, 48000).unwrap()
     }
 
     #[test]
@@ -212,8 +313,114 @@ mod tests {
             &lex("loop \"a\":\n    kick << \"x\"\nloop \"a\":\n    kick << \"x\"\n").unwrap(),
         )
         .unwrap();
-        let err = schedule(&program, 0, 96000, 48000).unwrap_err();
+        let err = schedule(&program, &HashMap::new(), &HashMap::new(), 96000, 48000).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Eval);
+    }
+
+    #[test]
+    fn events_carry_params_and_velocity() {
+        let tl = src2timeline_v11(
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x!0.5 . x\" pan=0.5 vel=0.8 delay=0.2 reverb=0.1\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            96000,
+        );
+        let ev = &tl.events[0];
+        assert_eq!(ev.velocity, 0.5 * 0.8);
+        assert_eq!(ev.pan, 0.5);
+        assert_eq!(ev.delay_send, 0.2);
+        assert_eq!(ev.reverb_send, 0.1);
+        assert_eq!(ev.loop_name, "b");
+        let ev2 = &tl.events[1];
+        assert_eq!(ev2.velocity, 0.8, "hits without !n use loop vel only");
+    }
+
+    #[test]
+    fn per_loop_generations_assigned() {
+        let mut gens = HashMap::new();
+        gens.insert("b".to_string(), 3u64);
+        let tl = src2timeline_v11(
+            "let kick = kick()\nlet hat = hat()\nloop \"b\":\n    kick << \"x .\"\nloop \"h\":\n    hat << \"x .\"\n",
+            &gens,
+            &HashMap::new(),
+            96000,
+        );
+        assert_eq!(tl.generation, 4, "max generation");
+        assert_eq!(
+            tl.loop_generations,
+            vec![("b".to_string(), 3), ("h".to_string(), 4)]
+        );
+        assert!(
+            tl.events
+                .iter()
+                .all(|e| e.generation == 3 || e.generation == 4)
+        );
+    }
+
+    #[test]
+    fn sample_events_get_data_and_duration() {
+        let frames: Vec<f32> = vec![0.0; 48000]; // 1s at 48k
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\"\n",
+            &HashMap::new(),
+            &samples,
+            96000,
+        );
+        let ev = &tl.events[0];
+        assert_eq!(ev.voice, VoiceKind::Sample);
+        assert!(ev.sample.is_some());
+        assert_eq!(ev.duration, 48000);
+        assert_eq!(ev.semitone, 0);
+    }
+
+    #[test]
+    fn sample_pitch_shift_scales_duration() {
+        let frames: Vec<f32> = vec![0.0; 48000];
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x@12\"\n",
+            &HashMap::new(),
+            &samples,
+            96000,
+        );
+        assert_eq!(
+            tl.events[0].duration, 24000,
+            "@12 = 2x rate = half duration"
+        );
+    }
+
+    #[test]
+    fn missing_sample_is_eval_error() {
+        let program =
+            parse(&lex("loop \"b\":\n    sample \"nope.wav\" << \"x\"\n").unwrap()).unwrap();
+        let err = schedule(&program, &HashMap::new(), &HashMap::new(), 96000, 48000).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Eval);
+    }
+
+    #[test]
+    fn sample_paths_are_reported() {
+        let program = parse(
+            &lex(
+                "let kick = kick()\nloop \"b\":\n    kick << \"x\"\n    sample \"a.wav\" << \"x\"\nloop \"c\":\n    sample \"b.wav\" << \"x\"\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sample_paths(&program),
+            vec!["a.wav".to_string(), "b.wav".to_string()]
+        );
     }
 
     #[test]

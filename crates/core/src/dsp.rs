@@ -73,6 +73,7 @@ impl Voice {
                 freq: Transport::note_frequency(pitch.unwrap_or(60)),
                 dur,
             }),
+            VoiceKind::Sample => unreachable!("sample voices are rendered from buffers"),
         }
     }
 

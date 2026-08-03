@@ -113,17 +113,24 @@ mod tests {
             bar_samples: 96000,
             sample_rate: 48000,
             loops: vec![],
+            loop_generations: vec![("b".to_string(), generation)],
         })
     }
 
     fn ev(offset: u64, voice: VoiceKind, generation: u64) -> Event {
         Event {
             sample_offset: offset,
+            loop_name: "b".to_string(),
             voice,
             pitch: None,
+            semitone: 0,
             velocity: 1.0,
             duration: 2400,
             generation,
+            pan: 0.0,
+            delay_send: 0.0,
+            reverb_send: 0.0,
+            sample: None,
         }
     }
 

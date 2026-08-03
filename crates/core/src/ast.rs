@@ -7,6 +7,7 @@ pub enum VoiceKind {
     Hat,
     Bass,
     Lead,
+    Sample,
 }
 
 #[derive(Debug, Clone, PartialEq)]

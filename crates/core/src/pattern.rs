@@ -476,4 +476,33 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Eval);
     }
+
+    #[test]
+    fn tuple_guard_applies_semitone_rule() {
+        let note = Note {
+            midi: 60,
+            span: Span { line: 1, col: 1 },
+        };
+        let err = bar_triggers(
+            &Expr::Tuple(vec![note.clone()], "x@2".into(), Span { line: 1, col: 1 }),
+            60,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Eval);
+        let (_, steps) = bar_triggers(
+            &Expr::Tuple(vec![note], "x@2".into(), Span { line: 1, col: 1 }),
+            60,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![Some(Step {
+                pitch: 60,
+                velocity: 1.0,
+                semitone: 2
+            })]
+        );
+    }
 }
