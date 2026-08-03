@@ -23,7 +23,7 @@ impl AudioQueue {
         self.inner.push(msg)
     }
 
-    pub fn recv(&self) -> Option<Msg> {
+    pub fn try_recv(&self) -> Option<Msg> {
         self.inner.pop()
     }
 }
@@ -50,9 +50,9 @@ mod tests {
         let q = AudioQueue::new(4);
         q.send(Msg::Swap(tl(1))).unwrap();
         q.send(Msg::Swap(tl(2))).unwrap();
-        assert!(matches!(q.recv(), Some(Msg::Swap(_))));
-        assert!(matches!(q.recv(), Some(Msg::Swap(_))));
-        assert!(q.recv().is_none());
+        assert!(matches!(q.try_recv(), Some(Msg::Swap(_))));
+        assert!(matches!(q.try_recv(), Some(Msg::Swap(_))));
+        assert!(q.try_recv().is_none());
     }
 
     #[test]
@@ -69,11 +69,27 @@ mod tests {
             q.send(Msg::Swap(tl(i))).unwrap();
         }
         let mut gens = Vec::new();
-        while let Some(m) = q.recv() {
+        while let Some(m) = q.try_recv() {
             if let Msg::Swap(tl) = m {
                 gens.push(tl.generation);
             }
         }
         assert_eq!(gens, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shutdown_is_delivered_in_order() {
+        let q = AudioQueue::new(4);
+        q.send(Msg::Swap(tl(1))).unwrap();
+        q.send(Msg::Shutdown).unwrap();
+        q.send(Msg::Swap(tl(2))).unwrap();
+        let mut order = Vec::new();
+        while let Some(m) = q.try_recv() {
+            order.push(match m {
+                Msg::Swap(_) => "swap",
+                Msg::Shutdown => "shutdown",
+            });
+        }
+        assert_eq!(order, vec!["swap", "shutdown", "swap"]);
     }
 }
