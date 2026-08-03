@@ -52,9 +52,15 @@ fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
 pub fn build_timeline(src: &str, sample_rate: u32) -> Result<Timeline, Error> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
+    let mut loop_generations = std::collections::HashMap::new();
+    for stmt in &program.statements {
+        if let cymbal_core::ast::Stmt::Loop(l) = stmt {
+            loop_generations.insert(l.name.clone(), 0);
+        }
+    }
     cymbal_core::scheduler::schedule(
         &program,
-        &std::collections::HashMap::new(),
+        &loop_generations,
         &std::collections::HashMap::new(),
         MAX_SAMPLES,
         sample_rate,

@@ -85,6 +85,7 @@ pub fn schedule(
     let mut loop_gens = Vec::new();
     let mut max_generation = 0;
     let mut seen_loops = std::collections::HashSet::new();
+    let auto_generation = loop_generations.values().max().copied().unwrap_or(0) + 1;
 
     for stmt in &program.statements {
         let Stmt::Loop(loop_stmt) = stmt else {
@@ -100,7 +101,7 @@ pub fn schedule(
         let generation = loop_generations
             .get(&loop_stmt.name)
             .copied()
-            .unwrap_or(max_generation + 1);
+            .unwrap_or(auto_generation);
         max_generation = max_generation.max(generation);
         loops.push(loop_stmt.name.clone());
         loop_gens.push((loop_stmt.name.clone(), generation));
@@ -581,5 +582,54 @@ mod tests {
         );
         assert_eq!(first, vec![0, 0, 34285, 48000, 48000, 82285]);
         assert_eq!(tl.events.iter().filter(|e| e.sample_offset == 0).count(), 2);
+    }
+
+    #[test]
+    fn bind_defaults_when_params_omitted() {
+        let tl = src2timeline_v11(
+            "let kick = kick()\nlet lead = lead()\nloop \"b\":\n    kick << \"x\"\n    lead << [c4]\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            96000,
+        );
+        let kick = tl
+            .events
+            .iter()
+            .find(|e| e.voice == VoiceKind::Kick)
+            .unwrap();
+        assert_eq!(kick.pan, 0.0);
+        assert_eq!(kick.delay_send, 0.0);
+        assert_eq!(kick.reverb_send, 0.0);
+        assert!(kick.sample.is_none());
+        assert_eq!(kick.semitone, 0);
+        assert_eq!(kick.velocity, 1.0);
+        assert_eq!(kick.pitch, None, "kick is unpitched by default");
+        let lead = tl
+            .events
+            .iter()
+            .find(|e| e.voice == VoiceKind::Lead)
+            .unwrap();
+        assert_eq!(lead.pitch, Some(60), "pitched voices default to c4");
+    }
+
+    #[test]
+    fn empty_map_gives_all_loops_one_generation() {
+        let tl = src2timeline_v11(
+            "let kick = kick()\nlet hat = hat()\nloop \"b\":\n    kick << \"x .\"\nloop \"h\":\n    hat << \"x .\"\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            96000,
+        );
+        assert!(!tl.events.is_empty());
+        let shared = tl.events[0].generation;
+        assert!(
+            tl.events.iter().all(|e| e.generation == shared),
+            "all loops must share one generation so every loop stays audible"
+        );
+        assert_eq!(tl.generation, shared);
+        assert_eq!(
+            tl.loop_generations,
+            vec![("b".to_string(), shared), ("h".to_string(), shared)]
+        );
     }
 }
