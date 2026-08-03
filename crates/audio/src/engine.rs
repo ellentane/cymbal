@@ -39,8 +39,8 @@ impl Engine {
             generation: 0,
             timeline: None,
             pending: None,
-            future: Vec::new(),
-            active: Vec::new(),
+            future: Vec::with_capacity(256),
+            active: Vec::with_capacity(32),
         }
     }
 
