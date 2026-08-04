@@ -2,6 +2,7 @@ pub mod ast;
 pub mod dsp;
 pub mod error;
 pub mod lexer;
+pub mod mixer;
 pub mod parser;
 pub mod pattern;
 pub mod render;
