@@ -13,26 +13,62 @@ fn check_len_fits(current: u32, add: usize) -> bool {
     current as u64 + add as u64 <= u32::MAX as u64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WavFormat {
+    Pcm16,
+    F32,
+}
+
 pub fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let mut pcm = Vec::with_capacity(samples.len() * 2);
-    for s in samples {
-        pcm.extend_from_slice(&quantize(*s).to_le_bytes());
+    encode_wav_with_format(samples, sample_rate, channels, WavFormat::Pcm16)
+}
+
+pub fn encode_wav_with_format(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    format: WavFormat,
+) -> Vec<u8> {
+    let mut pcm = Vec::new();
+    match format {
+        WavFormat::Pcm16 => {
+            for s in samples {
+                pcm.extend_from_slice(&quantize(*s).to_le_bytes());
+            }
+        }
+        WavFormat::F32 => {
+            for s in samples {
+                pcm.extend_from_slice(&s.to_le_bytes());
+            }
+        }
     }
     let data_len = pcm.len() as u32;
-    let byte_rate = sample_rate * channels as u32 * 2;
-    let block_align = channels * 2;
+    let bytes_per_sample: u32 = match format {
+        WavFormat::Pcm16 => 2,
+        WavFormat::F32 => 4,
+    };
+    let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
+    let block_align = channels * bytes_per_sample as u16;
+    let bits: u16 = match format {
+        WavFormat::Pcm16 => 16,
+        WavFormat::F32 => 32,
+    };
+    let fmt_tag: u16 = match format {
+        WavFormat::Pcm16 => 1,
+        WavFormat::F32 => 3,
+    };
     let mut wav = Vec::with_capacity(44 + pcm.len());
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&(36 + data_len).to_le_bytes());
     wav.extend_from_slice(b"WAVE");
     wav.extend_from_slice(b"fmt ");
     wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&fmt_tag.to_le_bytes());
     wav.extend_from_slice(&channels.to_le_bytes());
     wav.extend_from_slice(&sample_rate.to_le_bytes());
     wav.extend_from_slice(&byte_rate.to_le_bytes());
     wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(&bits.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
     wav.extend_from_slice(&pcm);
@@ -53,21 +89,44 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Res
 
 pub struct WavWriter {
     file: std::fs::File,
+    format: WavFormat,
     data_len: u32,
 }
 
 impl WavWriter {
     pub fn create(path: &Path, sample_rate: u32, channels: u16) -> std::io::Result<Self> {
+        Self::create_with_format(path, sample_rate, channels, WavFormat::Pcm16)
+    }
+
+    pub fn create_with_format(
+        path: &Path,
+        sample_rate: u32,
+        channels: u16,
+        format: WavFormat,
+    ) -> std::io::Result<Self> {
         let mut file = std::fs::File::create(path)?;
-        let header = encode_wav(&[], sample_rate, channels);
+        let header = encode_wav_with_format(&[], sample_rate, channels, format);
         file.write_all(&header)?;
-        Ok(Self { file, data_len: 0 })
+        Ok(Self {
+            file,
+            format,
+            data_len: 0,
+        })
     }
 
     pub fn write_interleaved(&mut self, frames: &[f32]) -> std::io::Result<()> {
         let mut pcm = Vec::with_capacity(frames.len() * 2);
-        for s in frames {
-            pcm.extend_from_slice(&quantize(*s).to_le_bytes());
+        match self.format {
+            WavFormat::Pcm16 => {
+                for s in frames {
+                    pcm.extend_from_slice(&quantize(*s).to_le_bytes());
+                }
+            }
+            WavFormat::F32 => {
+                for s in frames {
+                    pcm.extend_from_slice(&s.to_le_bytes());
+                }
+            }
         }
         if !check_len_fits(self.data_len, pcm.len()) {
             return Err(std::io::Error::new(
@@ -100,6 +159,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
     let mut channels = None;
     let mut sample_rate = None;
     let mut data = None;
+    let mut fmt_tag = 0u16;
     let mut pos = 12usize;
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
@@ -110,17 +170,20 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
                 if size < 16 || payload + 16 > bytes.len() {
                     return Err(err("wav fmt chunk truncated"));
                 }
-                if u16::from_le_bytes(bytes[payload..payload + 2].try_into().unwrap()) != 1 {
-                    return Err(err("unsupported wav format"));
-                }
+                fmt_tag = u16::from_le_bytes(bytes[payload..payload + 2].try_into().unwrap());
                 channels = Some(u16::from_le_bytes(
                     bytes[payload + 2..payload + 4].try_into().unwrap(),
                 ));
                 sample_rate = Some(u32::from_le_bytes(
                     bytes[payload + 4..payload + 8].try_into().unwrap(),
                 ));
-                if u16::from_le_bytes(bytes[payload + 14..payload + 16].try_into().unwrap()) != 16 {
-                    return Err(err("only 16-bit wav files are supported"));
+                let bits =
+                    u16::from_le_bytes(bytes[payload + 14..payload + 16].try_into().unwrap());
+                match fmt_tag {
+                    1 if bits == 16 => {}
+                    3 if bits == 32 => {}
+                    3 => return Err(err("only 32-bit float wav files are supported")),
+                    _ => return Err(err("unsupported wav format")),
                 }
             }
             b"data" => {
@@ -139,14 +202,26 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
     if !data_len.is_multiple_of(2) {
         return Err(err("wav data chunk must contain whole samples"));
     }
+    if fmt_tag == 3 && !data_len.is_multiple_of(4) {
+        return Err(err("wav data chunk must contain whole f32 samples"));
+    }
     if channels == 2 && !(data_len / 2).is_multiple_of(2) {
         return Err(err("wav data chunk must contain whole stereo frames"));
     }
     let pcm = &bytes[data_start..data_start + data_len];
     let mut samples = Vec::with_capacity(data_len / 2);
-    for chunk in pcm.chunks_exact(2) {
-        let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
-        samples.push(s);
+    match fmt_tag {
+        1 => {
+            for chunk in pcm.chunks_exact(2) {
+                let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
+                samples.push(s);
+            }
+        }
+        _ => {
+            for chunk in pcm.chunks_exact(4) {
+                samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+        }
     }
     if channels == 2 {
         samples = samples.chunks(2).map(|c| (c[0] + c[1]) * 0.5).collect();
@@ -324,5 +399,37 @@ mod tests {
         assert!(!check_len_fits(u32::MAX - 1, 2));
         assert!(check_len_fits(0, u32::MAX as usize));
         assert!(!check_len_fits(0, u32::MAX as usize + 1));
+    }
+
+    #[test]
+    fn f32_round_trips_exactly() {
+        let samples = [0.5, -0.25, 1.0, -1.0, 0.0];
+        let wav = encode_wav_with_format(&samples, 48000, 1, WavFormat::F32);
+        assert_eq!(&wav[20..22], &3u16.to_le_bytes(), "fmt tag 3");
+        assert_eq!(&wav[34..36], &32u16.to_le_bytes(), "bits 32");
+        let data = decode_wav(&wav).unwrap();
+        assert_eq!(data.sample_rate, 48000);
+        assert_eq!(data.frames.as_slice(), &samples);
+    }
+
+    #[test]
+    fn f32_writer_patches_header() {
+        let path = std::env::temp_dir().join(format!("cymbal_f32_{}.wav", std::process::id()));
+        let mut w = WavWriter::create_with_format(&path, 48000, 2, WavFormat::F32).unwrap();
+        w.write_interleaved(&[0.5, 0.5, -0.5, -0.5]).unwrap();
+        w.finalize().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 44 + 16, "2 frames * 2 ch * 4 bytes");
+        let data = decode_wav(&bytes).unwrap();
+        assert_eq!(data.frames.as_slice(), &[0.5, -0.5]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn f32_decode_rejects_wrong_bits() {
+        let mut wav = encode_wav_with_format(&[0.5], 48000, 1, WavFormat::F32);
+        wav[34..36].copy_from_slice(&16u16.to_le_bytes());
+        let err = decode_wav(&wav).unwrap_err();
+        assert!(err.message.contains("32-bit"));
     }
 }
