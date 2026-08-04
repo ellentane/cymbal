@@ -261,13 +261,14 @@ mod tests {
     fn short_fmt_chunk_is_rejected() {
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(&44u32.to_le_bytes());
         wav.extend_from_slice(b"WAVE");
         wav.extend_from_slice(b"fmt ");
         wav.extend_from_slice(&4u32.to_le_bytes());
         wav.extend_from_slice(&[1, 0, 1, 0]);
         wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&0u32.to_le_bytes());
+        wav.extend_from_slice(&8u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 8]);
         let err = decode_wav(&wav).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Eval);
         assert!(err.message.contains("wav fmt chunk truncated"));
