@@ -265,6 +265,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
         }
     };
     status.latency_ms = handle.as_ref().and_then(|h| h.latency_ms);
+    status.device_rate = handle.as_ref().map(|h| h.device_rate);
 
     let (msg_tx, msg_rx) = mpsc::channel::<UiMsg>();
 
