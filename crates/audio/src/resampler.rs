@@ -1,6 +1,7 @@
 // Every output position is (n0 + k) as f64 * step, one fp multiply, bit-identical
-// across block splits; do not "simplify" to n0 as f64 + k as f64 * step. The
-// invariant pushed = consumed + buffered makes frames_needed(n) - buffered_frames() exact.
+// across block splits; do not "simplify" to n0 as f64 + k as f64 * step. Drain is
+// capped at the buffered frame count so pushed = consumed + buffered holds exactly
+// and the buffer front always equals consumed.
 pub struct Resampler {
     step: f64,
     n0: u64,
@@ -46,14 +47,13 @@ impl Resampler {
             out[k * 2 + 1] = a[1] + (b[1] - a[1]) * frac;
         }
         self.n0 += m as u64;
-        let new_consumed = (self.n0 as f64 * self.step).floor() as usize;
-        let drain = new_consumed - self.consumed;
+        let drain = ((self.n0 as f64 * self.step).floor() as usize - self.consumed).min(frames);
         if drain >= frames {
             self.buf.clear();
         } else if drain > 0 {
             self.buf.drain(..drain * 2);
         }
-        self.consumed = new_consumed;
+        self.consumed += drain;
     }
 }
 
@@ -165,6 +165,7 @@ mod tests {
         let stream_pos = n1;
         let mut o2 = vec![0.0f32; 36000 * 2];
         let n2 = r2.frames_needed(36000);
+        // n1 + n2 = 48002 > 48000 source frames: the clamped tail is exactly what this test verifies.
         r2.push(&src[stream_pos * 2..(stream_pos + n2).min(src.len() / 2) * 2]);
         r2.process(&mut o2);
         let mut split = o1;
@@ -175,7 +176,7 @@ mod tests {
 
     #[test]
     fn buffered_frames_stays_bounded_in_steady_state() {
-        for rate in [44100u32, 48000, 96000] {
+        for rate in [22050u32, 44100, 48000, 96000] {
             let mut r = Resampler::new(rate);
             let mut src_pos = 0usize;
             let mut out = vec![0.0f32; 512 * 2];
@@ -196,5 +197,40 @@ mod tests {
                 assert!(b < 8, "rate {rate} block {block_i}: buffered {b} frames");
             }
         }
+    }
+
+    #[test]
+    fn steady_state_output_matches_one_shot_reference() {
+        // 2s at 48k: sawtooth, L = +, R = -
+        let mut src = Vec::with_capacity(96000 * 2);
+        for i in 0..96000 {
+            let l = ((i % 977) as f32 / 977.0) * 0.5;
+            src.push(l);
+            src.push(-l);
+        }
+        // one shot: 96000 input frames -> 44100 output frames at 22050
+        let mut r = Resampler::new(22050);
+        r.push(&src);
+        let mut full = vec![0.0f32; 44100 * 2];
+        r.process(&mut full);
+        // streamed in 512-frame blocks, input capped at the signal length
+        let mut r2 = Resampler::new(22050);
+        let mut out = vec![0.0f32; 512 * 2];
+        let mut streamed = Vec::new();
+        let mut pushed = 0usize;
+        for _ in 0..10_000 {
+            let needed = r2.frames_needed(512) - r2.buffered_frames();
+            let end = (pushed + needed).min(src.len() / 2);
+            r2.push(&src[pushed * 2..end * 2]);
+            pushed = end;
+            r2.process(&mut out);
+            streamed.extend_from_slice(&out);
+            if pushed == src.len() / 2 {
+                break;
+            }
+        }
+        streamed.truncate(full.len());
+        assert_eq!(streamed.len(), full.len());
+        assert_eq!(streamed, full, "streamed must match one-shot at 22050");
     }
 }
