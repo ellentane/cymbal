@@ -44,6 +44,39 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Res
     Ok(())
 }
 
+pub struct WavWriter {
+    file: std::fs::File,
+    data_len: u32,
+}
+
+impl WavWriter {
+    pub fn create(path: &Path, sample_rate: u32, channels: u16) -> std::io::Result<Self> {
+        let mut file = std::fs::File::create(path)?;
+        let header = encode_wav(&[], sample_rate, channels);
+        file.write_all(&header)?;
+        Ok(Self { file, data_len: 0 })
+    }
+
+    pub fn write_interleaved(&mut self, frames: &[f32]) -> std::io::Result<()> {
+        let mut pcm = Vec::with_capacity(frames.len() * 2);
+        for s in frames {
+            let v = ((s.clamp(-1.0, 1.0) * 32768.0).round() as i32).clamp(-32768, 32767) as i16;
+            pcm.extend_from_slice(&v.to_le_bytes());
+        }
+        self.data_len += pcm.len() as u32;
+        self.file.write_all(&pcm)
+    }
+
+    pub fn finalize(mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(4))?;
+        self.file.write_all(&(36 + self.data_len).to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(40))?;
+        self.file.write_all(&self.data_len.to_le_bytes())?;
+        self.file.sync_all()
+    }
+}
+
 pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(Error::new(
@@ -174,6 +207,39 @@ mod tests {
         let path = std::env::temp_dir().join(format!("cymbal_test_odd_{}.wav", std::process::id()));
         assert!(write_wav(&path, &[0.0, 0.5, -0.5], 48000).is_err());
         assert!(!path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wav_writer_round_trips() {
+        let path = std::env::temp_dir().join(format!("cymbal_ww_{}.wav", std::process::id()));
+        let mut w = WavWriter::create(&path, 48000, 1).unwrap();
+        let frames: Vec<f32> = vec![0.0, 0.5, -0.5, 1.0, -1.0];
+        w.write_interleaved(&frames).unwrap();
+        w.finalize().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let data = decode_wav(&bytes).unwrap();
+        assert_eq!(data.sample_rate, 48000);
+        assert_eq!(data.frames.len(), 5);
+        assert_eq!(
+            data.frames.as_slice(),
+            &[0.0, 0.5, -0.5, 32767.0 / 32768.0, -1.0]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wav_writer_patches_header_sizes() {
+        let path = std::env::temp_dir().join(format!("cymbal_ww2_{}.wav", std::process::id()));
+        let mut w = WavWriter::create(&path, 48000, 2).unwrap();
+        w.write_interleaved(&[0.0, 0.0, 0.0, 0.0]).unwrap();
+        w.finalize().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        let riff_len = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(riff_len, 36 + 8, "2 frames * 2 ch * 2 bytes = 8 data bytes");
+        let data_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+        assert_eq!(data_len, 8);
         let _ = std::fs::remove_file(&path);
     }
 }
