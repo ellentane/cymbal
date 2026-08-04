@@ -6,6 +6,7 @@ use cymbal_core::scheduler::Timeline;
 
 use crate::engine::Engine;
 use crate::ring::AudioQueue;
+use crate::ring::Msg;
 
 pub enum AudioError {
     NoDevice,
@@ -42,6 +43,19 @@ pub fn buffer_latency_ms(config: &cpal::StreamConfig) -> Option<f32> {
     }
 }
 
+fn expand_to_device(scratch: &[f32], data: &mut [f32], channels: usize) {
+    let frames = data.len() / channels;
+    for (i, frame) in scratch.chunks(2).take(frames).enumerate() {
+        let l = frame[0];
+        let r = frame[1];
+        data[i * channels] = l;
+        data[i * channels + 1] = r;
+        for ch in 2..channels {
+            data[i * channels + ch] = if ch % 2 == 0 { l } else { r };
+        }
+    }
+}
+
 pub fn start_audio(
     queue: Arc<AudioQueue>,
     initial: Arc<Timeline>,
@@ -72,29 +86,21 @@ pub fn start_audio(
             move |data: &mut [f32], _| {
                 while let Some(msg) = queue.try_recv() {
                     match msg {
-                        crate::ring::Msg::Swap(tl) => engine.submit_swap(tl),
-                        crate::ring::Msg::RecordStart(rec) => engine.start_recording(rec),
-                        crate::ring::Msg::RecordStop => engine.stop_recording(),
-                        crate::ring::Msg::Shutdown => {
+                        Msg::Swap(tl) => engine.submit_swap(tl),
+                        Msg::RecordStart(rec) => engine.start_recording(rec),
+                        Msg::RecordStop => engine.stop_recording(),
+                        Msg::Shutdown => {
                             data.fill(0.0);
                             return;
                         }
                     }
                 }
                 let frames = data.len() / channels;
-                if frames * 2 > scratch.len() {
+                if frames > scratch.len() / 2 {
                     scratch.resize(frames * 2, 0.0);
                 }
-                // Task 8 placeholder: engine renders interleaved stereo; the
-                // mono downmix below is temporary until Task 11 replaces this
-                // callback with expand_to_device.
                 engine.process(&mut scratch[..frames * 2]);
-                for (i, ch) in scratch.chunks(2).take(frames).enumerate() {
-                    let mono = (ch[0] + ch[1]) * 0.5;
-                    for out in data[i * channels..(i + 1) * channels].iter_mut() {
-                        *out = mono;
-                    }
-                }
+                expand_to_device(&scratch, data, channels);
             },
             err_cb,
             None,
@@ -113,6 +119,12 @@ pub fn start_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_cpal_errors_to_audio_kind() {
+        let e = AudioError::NoDevice;
+        assert_eq!(e.into_error().kind, ErrorKind::Audio);
+    }
 
     #[test]
     fn buffer_latency_ms_from_fixed_buffer() {
@@ -135,8 +147,18 @@ mod tests {
     }
 
     #[test]
-    fn maps_cpal_errors_to_audio_kind() {
-        let e = AudioError::NoDevice;
-        assert_eq!(e.into_error().kind, ErrorKind::Audio);
+    fn expands_stereo_to_device_channels() {
+        let scratch = [0.1, 0.2, 0.3, 0.4];
+        let mut data = [0.0f32; 8];
+        expand_to_device(&scratch, &mut data, 4);
+        assert_eq!(data, [0.1, 0.2, 0.1, 0.2, 0.3, 0.4, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn stereo_fits_two_channel_device() {
+        let scratch = [0.1, 0.2];
+        let mut data = [0.0f32; 2];
+        expand_to_device(&scratch, &mut data, 2);
+        assert_eq!(data, [0.1, 0.2]);
     }
 }
