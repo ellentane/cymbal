@@ -241,7 +241,11 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
         }
         _ => {
             for chunk in pcm.chunks_exact(4) {
-                samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if !s.is_finite() {
+                    return Err(err("wav contains non-finite samples"));
+                }
+                samples.push(s);
             }
         }
     }
@@ -450,6 +454,20 @@ mod tests {
         let data = decode_wav(&bytes).unwrap();
         assert_eq!(data.frames.as_slice(), &[0.5, -0.5]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn f32_decode_rejects_non_finite_samples() {
+        let wav = encode_wav_with_format(
+            &[0.5, f32::NAN, f32::INFINITY, -f32::INFINITY],
+            48000,
+            1,
+            WavFormat::F32,
+        );
+        let err = decode_wav(&wav).unwrap_err();
+        assert!(err.message.contains("non-finite"));
+        let wav = encode_wav_with_format(&[0.5, -0.25, 1.0], 48000, 1, WavFormat::F32);
+        assert!(decode_wav(&wav).is_ok(), "finite f32 wav must still decode");
     }
 
     #[test]
