@@ -1,4 +1,6 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,6 +11,7 @@ fn quantize(s: f32) -> i16 {
     ((s.clamp(-1.0, 1.0) * 32768.0).round() as i32).clamp(-32768, 32767) as i16
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn check_len_fits(current: u32, add: usize) -> bool {
     current as u64 + add as u64 <= u32::MAX as u64
 }
@@ -87,6 +90,7 @@ pub fn encode_wav_with_format(
     wav
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
     if !samples.len().is_multiple_of(2) {
         return Err(std::io::Error::new(
@@ -99,12 +103,14 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> std::io::Res
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct WavWriter {
     file: std::fs::File,
     format: WavFormat,
     data_len: u32,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WavWriter {
     pub fn create(path: &Path, sample_rate: u32, channels: u16) -> std::io::Result<Self> {
         Self::create_with_format(path, sample_rate, channels, WavFormat::Pcm16)
