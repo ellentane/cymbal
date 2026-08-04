@@ -72,6 +72,13 @@ pub fn expand_string(s: &str) -> Result<Vec<Hit>> {
                             "expected integer after '@'",
                         )
                     })?;
+                    if !(-48..=48).contains(&semitone) {
+                        return Err(Error::new(
+                            Span { line: 1, col: 1 },
+                            ErrorKind::Parse,
+                            "semitone shift out of range (-48..=48)",
+                        ));
+                    }
                 }
                 hits.push(Hit {
                     on: true,
@@ -432,6 +439,28 @@ mod tests {
                 on: true,
                 velocity: 1.0,
                 semitone: -2
+            }]
+        );
+    }
+
+    #[test]
+    fn semitone_shift_bounded_to_four_octaves() {
+        assert_eq!(expand_string("x@49").unwrap_err().kind, ErrorKind::Parse);
+        assert_eq!(expand_string("x@-49").unwrap_err().kind, ErrorKind::Parse);
+        assert_eq!(
+            expand_string("x@48").unwrap(),
+            vec![Hit {
+                on: true,
+                velocity: 1.0,
+                semitone: 48
+            }]
+        );
+        assert_eq!(
+            expand_string("x@-48").unwrap(),
+            vec![Hit {
+                on: true,
+                velocity: 1.0,
+                semitone: -48
             }]
         );
     }
