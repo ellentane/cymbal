@@ -107,7 +107,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
         let payload = pos + 8;
         match id {
             b"fmt " => {
-                if payload + 16 > bytes.len() {
+                if size < 16 || payload + 16 > bytes.len() {
                     return Err(err("wav fmt chunk truncated"));
                 }
                 if u16::from_le_bytes(bytes[payload..payload + 2].try_into().unwrap()) != 1 {
@@ -125,9 +125,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
             }
             b"data" => {
                 if payload + size > bytes.len() {
-                    return Err(err(
-                        "the data chunk's declared size exceeds the remaining bytes",
-                    ));
+                    return Err(err("wav data chunk truncated"));
                 }
                 data = Some((payload, size));
             }
@@ -257,6 +255,22 @@ mod tests {
         let err = decode_wav(&wav).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Eval);
         assert!(err.message.contains("unsupported wav format"));
+    }
+
+    #[test]
+    fn short_fmt_chunk_is_rejected() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 0, 1, 0]);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&0u32.to_le_bytes());
+        let err = decode_wav(&wav).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Eval);
+        assert!(err.message.contains("wav fmt chunk truncated"));
     }
 
     #[test]

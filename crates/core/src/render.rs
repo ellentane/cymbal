@@ -168,7 +168,7 @@ mod tests {
         );
         assert!(
             window_has_energy(&delayed, 72000, 72020, 0.05),
-            "echo of the second kick frame must land in the tap window"
+            "delay tap reads one sample late; the first audible echo is the kick's t=1 sample at frame 72001"
         );
         assert!(
             !window_has_energy(&plain, 20000, 30000, 1e-3),
