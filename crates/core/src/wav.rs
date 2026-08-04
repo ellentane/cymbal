@@ -29,7 +29,11 @@ pub fn encode_wav_with_format(
     channels: u16,
     format: WavFormat,
 ) -> Vec<u8> {
-    let mut pcm = Vec::new();
+    let bytes_per_sample: u32 = match format {
+        WavFormat::Pcm16 => 2,
+        WavFormat::F32 => 4,
+    };
+    let mut pcm = Vec::with_capacity(samples.len() * bytes_per_sample as usize);
     match format {
         WavFormat::Pcm16 => {
             for s in samples {
@@ -43,10 +47,6 @@ pub fn encode_wav_with_format(
         }
     }
     let data_len = pcm.len() as u32;
-    let bytes_per_sample: u32 = match format {
-        WavFormat::Pcm16 => 2,
-        WavFormat::F32 => 4,
-    };
     let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
     let block_align = channels * bytes_per_sample as u16;
     let bits: u16 = match format {
@@ -115,7 +115,10 @@ impl WavWriter {
     }
 
     pub fn write_interleaved(&mut self, frames: &[f32]) -> std::io::Result<()> {
-        let mut pcm = Vec::with_capacity(frames.len() * 2);
+        let mut pcm = Vec::with_capacity(match self.format {
+            WavFormat::Pcm16 => frames.len() * 2,
+            WavFormat::F32 => frames.len() * 4,
+        });
         match self.format {
             WavFormat::Pcm16 => {
                 for s in frames {
@@ -205,7 +208,8 @@ pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
     if fmt_tag == 3 && !data_len.is_multiple_of(4) {
         return Err(err("wav data chunk must contain whole f32 samples"));
     }
-    if channels == 2 && !(data_len / 2).is_multiple_of(2) {
+    let sample_size = if fmt_tag == 3 { 4 } else { 2 };
+    if channels == 2 && !(data_len / sample_size).is_multiple_of(2) {
         return Err(err("wav data chunk must contain whole stereo frames"));
     }
     let pcm = &bytes[data_start..data_start + data_len];
@@ -431,5 +435,11 @@ mod tests {
         wav[34..36].copy_from_slice(&16u16.to_le_bytes());
         let err = decode_wav(&wav).unwrap_err();
         assert!(err.message.contains("32-bit"));
+    }
+
+    #[test]
+    fn f32_stereo_odd_sample_count_is_rejected_not_panic() {
+        let wav = encode_wav_with_format(&[0.5, -0.5, 0.25], 48000, 2, WavFormat::F32);
+        assert!(decode_wav(&wav).is_err());
     }
 }
