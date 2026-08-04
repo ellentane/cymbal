@@ -3,6 +3,7 @@ mod highlight;
 mod samples;
 mod status;
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -36,7 +37,21 @@ const RENDER_DEFAULT_SECONDS: u64 = 120;
 enum UiMsg {
     Err(Error),
     Info(String),
-    Loops(Vec<String>),
+    Reloaded(HashMap<String, u64>),
+}
+
+fn next_loop_generations(
+    current: &HashMap<String, u64>,
+    loop_names: &[String],
+) -> HashMap<String, u64> {
+    let max = current.values().copied().max().unwrap_or(0);
+    loop_names
+        .iter()
+        .map(|name| {
+            let g = current.get(name).copied().unwrap_or(max + 1);
+            (name.clone(), g)
+        })
+        .collect()
 }
 
 fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
@@ -46,23 +61,40 @@ fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
             status.clear_error();
             status.message = s;
         }
-        UiMsg::Loops(loops) => status.loops = loops,
+        UiMsg::Reloaded(lg) => {
+            status.loops = lg.keys().cloned().collect();
+            status.clear_error();
+            status.message = "reloaded".into();
+        }
     }
 }
 
-pub fn build_timeline(src: &str, sample_rate: u32) -> Result<Timeline, Error> {
+fn loop_names(src: &str) -> Result<Vec<String>, Error> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
-    let mut loop_generations = std::collections::HashMap::new();
-    for stmt in &program.statements {
-        if let cymbal_core::ast::Stmt::Loop(l) = stmt {
-            loop_generations.insert(l.name.clone(), 0);
-        }
-    }
+    Ok(program
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            cymbal_core::ast::Stmt::Loop(l) => Some(l.name.clone()),
+            _ => None,
+        })
+        .collect())
+}
+
+pub fn build_timeline_with(
+    src: &str,
+    sample_rate: u32,
+    base_dir: &std::path::Path,
+    loop_generations: &HashMap<String, u64>,
+) -> Result<Timeline, Error> {
+    let tokens = lex(src)?;
+    let program = parse(&tokens)?;
+    let samples = samples::load_samples(&program, base_dir)?;
     cymbal_core::scheduler::schedule(
         &program,
-        &loop_generations,
-        &std::collections::HashMap::new(),
+        loop_generations,
+        &samples,
         MAX_SAMPLES,
         sample_rate,
     )
@@ -76,14 +108,12 @@ fn render_to_wav(
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let max_samples = seconds.saturating_mul(SAMPLE_RATE as u64).min(MAX_SAMPLES);
-    let samples = cymbal_core::render::render_offline(
-        &src,
-        max_samples,
-        SAMPLE_RATE,
-        &std::collections::HashMap::new(),
-    )
-    .map_err(|e| format!("render failed: {e}"))?;
-    cymbal_core::wav::write_wav(output, &samples, SAMPLE_RATE)
+    let program = parse(&lex(&src).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let base = input.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let samples = samples::load_samples(&program, base).map_err(|e| e.to_string())?;
+    let samples_out = cymbal_core::render::render_offline(&src, max_samples, SAMPLE_RATE, &samples)
+        .map_err(|e| format!("render failed: {e}"))?;
+    cymbal_core::wav::write_wav(output, &samples_out, SAMPLE_RATE)
         .map_err(|e| format!("cannot write {}: {e}", output.display()))
 }
 
@@ -151,7 +181,10 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
 
     let queue = Arc::new(AudioQueue::new(16));
-    let initial = build_timeline(&src, SAMPLE_RATE).map_err(|e| e.to_string())?;
+    let base = file.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let initial =
+        build_timeline_with(&src, SAMPLE_RATE, base, &HashMap::new()).map_err(|e| e.to_string())?;
+    let mut latest_loops: HashMap<String, u64> = initial.loop_generations.iter().cloned().collect();
     let mut status = Status::new();
     status.loops = initial.loops.clone();
     let handle = match cymbal_audio::stream::start_audio(queue.clone(), Arc::new(initial), |_e| {})
@@ -187,10 +220,20 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let src = editor.content();
                             let queue = queue.clone();
                             let tx = msg_tx.clone();
-                            std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
-                                Ok(tl) => {
-                                    let _ = tx.send(UiMsg::Loops(tl.loops.clone()));
-                                    let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                            let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                            let latest = latest_loops.clone();
+                            std::thread::spawn(move || match loop_names(&src) {
+                                Ok(names) => {
+                                    let gens = next_loop_generations(&latest, &names);
+                                    match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
+                                        Ok(tl) => {
+                                            let _ = tx.send(UiMsg::Reloaded(gens));
+                                            let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(UiMsg::Err(e));
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     let _ = tx.send(UiMsg::Err(e));
@@ -246,13 +289,20 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let src = apply_tempo_override(&editor.content(), status.tempo);
                             let queue = queue.clone();
                             let tx = msg_tx.clone();
-                            std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
-                                Ok(tl) => {
-                                    let _ = tx.send(UiMsg::Loops(tl.loops.clone()));
-                                    let _ = queue.send(Msg::Swap(Arc::new(tl)));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(UiMsg::Err(e));
+                            let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                            let gens = latest_loops
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v + 1))
+                                .collect();
+                            std::thread::spawn(move || {
+                                match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
+                                    Ok(tl) => {
+                                        let _ = tx.send(UiMsg::Reloaded(gens));
+                                        let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(UiMsg::Err(e));
+                                    }
                                 }
                             });
                         }
@@ -261,13 +311,20 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let src = apply_tempo_override(&editor.content(), status.tempo);
                             let queue = queue.clone();
                             let tx = msg_tx.clone();
-                            std::thread::spawn(move || match build_timeline(&src, SAMPLE_RATE) {
-                                Ok(tl) => {
-                                    let _ = tx.send(UiMsg::Loops(tl.loops.clone()));
-                                    let _ = queue.send(Msg::Swap(Arc::new(tl)));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(UiMsg::Err(e));
+                            let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                            let gens = latest_loops
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v + 1))
+                                .collect();
+                            std::thread::spawn(move || {
+                                match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
+                                    Ok(tl) => {
+                                        let _ = tx.send(UiMsg::Reloaded(gens));
+                                        let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(UiMsg::Err(e));
+                                    }
                                 }
                             });
                         }
@@ -289,6 +346,9 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                 }
             }
             if let Ok(msg) = msg_rx.try_recv() {
+                if let UiMsg::Reloaded(lg) = &msg {
+                    latest_loops = lg.clone();
+                }
                 apply_ui_msg(&mut status, msg);
             }
             terminal.draw(|f| {
@@ -354,14 +414,21 @@ mod tests {
     #[test]
     fn build_timeline_from_source() {
         let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . . x\"\n";
-        let tl = build_timeline(src, 48000).unwrap();
+        let tl =
+            build_timeline_with(src, 48000, std::path::Path::new("."), &HashMap::new()).unwrap();
         assert!(!tl.events.is_empty());
         assert!(tl.events.iter().all(|e| e.voice == VoiceKind::Kick));
     }
 
     #[test]
     fn invalid_source_reports_error() {
-        let err = build_timeline("loop \"b\":\n    kick << \"x y\"\n", 48000).unwrap_err();
+        let err = build_timeline_with(
+            "loop \"b\":\n    kick << \"x y\"\n",
+            48000,
+            std::path::Path::new("."),
+            &HashMap::new(),
+        )
+        .unwrap_err();
         assert!(err.message.contains("pattern"));
     }
 
@@ -400,19 +467,45 @@ mod tests {
     }
 
     #[test]
-    fn apply_ui_msg_sets_loops_from_swap() {
-        let mut status = Status::new();
-        apply_ui_msg(&mut status, UiMsg::Loops(vec!["b".into(), "h".into()]));
-        assert_eq!(status.loops, vec!["b".to_string(), "h".to_string()]);
-        assert_eq!(status.error, None);
-    }
-
-    #[test]
     fn apply_ui_msg_info_clears_error() {
         let mut status = Status::new();
         status.set_error("boom".into());
         apply_ui_msg(&mut status, UiMsg::Info("exported out.wav".into()));
         assert_eq!(status.error, None);
         assert_eq!(status.message, "exported out.wav");
+    }
+
+    #[test]
+    fn build_timeline_with_loop_generations() {
+        let mut gens = HashMap::new();
+        gens.insert("b".to_string(), 5u64);
+        let tl = build_timeline_with(
+            "let kick = kick()\nloop \"b\":\n    kick << \"x .\"\n",
+            48000,
+            std::path::Path::new("."),
+            &gens,
+        )
+        .unwrap();
+        assert_eq!(tl.generation, 5);
+    }
+
+    #[test]
+    fn apply_ui_msg_reloaded_updates_loops() {
+        let mut status = Status::new();
+        let mut lg = HashMap::new();
+        lg.insert("b".to_string(), 1u64);
+        apply_ui_msg(&mut status, UiMsg::Reloaded(lg));
+        assert_eq!(status.loops, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn reload_diff_bumps_only_new_loops() {
+        let mut old = HashMap::new();
+        old.insert("b".to_string(), 2u64);
+        old.insert("h".to_string(), 2u64);
+        let new = next_loop_generations(&old, &["b".to_string(), "h".to_string(), "k".to_string()]);
+        assert_eq!(new.get("b"), Some(&2), "unchanged loop keeps generation");
+        assert_eq!(new.get("h"), Some(&2));
+        assert_eq!(new.get("k"), Some(&3), "new loop gets max+1");
     }
 }

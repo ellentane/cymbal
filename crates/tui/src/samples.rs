@@ -6,7 +6,6 @@ use cymbal_core::ast::Program;
 use cymbal_core::error::{Error, ErrorKind, Span};
 use cymbal_core::scheduler::{SampleData, sample_paths};
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn load_samples(
     program: &Program,
     base_dir: &Path,
@@ -21,7 +20,8 @@ pub fn load_samples(
                 format!("cannot read {}: {e}", full.display()),
             )
         })?;
-        let data = cymbal_core::wav::decode_wav(&bytes)?;
+        let data = cymbal_core::wav::decode_wav(&bytes)
+            .map_err(|e| Error::new(e.span, e.kind, format!("{}: {e}", full.display())))?;
         out.insert(path, Arc::new(data));
     }
     Ok(out)
@@ -57,5 +57,24 @@ mod tests {
             parse(&lex("loop \"b\":\n    sample \"nope.wav\" << \"x\"\n").unwrap()).unwrap();
         let err = load_samples(&program, std::path::Path::new("/nonexistent")).unwrap_err();
         assert!(err.message.contains("nope.wav"));
+    }
+
+    #[test]
+    fn corrupted_sample_names_file_in_error() {
+        let dir = std::env::temp_dir();
+        let wav_path = dir.join(format!("cymbal_bad_{}.wav", std::process::id()));
+        std::fs::write(&wav_path, b"this is not a wav").unwrap();
+        let src = format!(
+            "loop \"b\":\n    sample \"{}\" << \"x\"\n",
+            wav_path.file_name().unwrap().to_str().unwrap()
+        );
+        let program = parse(&lex(&src).unwrap()).unwrap();
+        let err = load_samples(&program, &dir).unwrap_err();
+        assert!(err.message.contains("RIFF"));
+        assert!(
+            err.message
+                .contains(&wav_path.file_name().unwrap().to_str().unwrap().to_string())
+        );
+        let _ = std::fs::remove_file(&wav_path);
     }
 }
