@@ -51,6 +51,7 @@ mod tests {
             sample_rate: 48000,
             loops: vec![],
             loop_generations: vec![],
+            midi: vec![],
         })
     }
 

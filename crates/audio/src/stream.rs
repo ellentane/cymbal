@@ -243,6 +243,7 @@ mod tests {
             sample_rate: 48000,
             loops: vec!["b".into()],
             loop_generations: vec![("b".into(), 0)],
+            midi: vec![],
         });
         engine.submit_swap(tl, 1);
 

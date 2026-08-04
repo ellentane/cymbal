@@ -63,6 +63,7 @@ pub struct Timeline {
     pub sample_rate: u32,
     pub loops: Vec<String>,
     pub loop_generations: Vec<(String, u64)>,
+    pub midi: Vec<crate::midi::MidiEvent>,
 }
 
 pub fn schedule(
@@ -217,6 +218,16 @@ pub fn schedule(
         }
     }
     events.sort_by_key(|e| e.sample_offset);
+    let midi = crate::midi::build_timeline_midi(&Timeline {
+        events: events.clone(),
+        generation: max_generation,
+        tempo,
+        bar_samples: transport_bar,
+        sample_rate,
+        loops: loops.clone(),
+        loop_generations: loop_gens.clone(),
+        midi: vec![],
+    });
     Ok(Timeline {
         events,
         generation: max_generation,
@@ -225,6 +236,7 @@ pub fn schedule(
         sample_rate,
         loops,
         loop_generations: loop_gens,
+        midi,
     })
 }
 

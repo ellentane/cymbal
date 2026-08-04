@@ -295,6 +295,7 @@ mod tests {
             sample_rate: 48000,
             loops: loop_generations.iter().map(|(n, _)| n.clone()).collect(),
             loop_generations,
+            midi: vec![],
         })
     }
 

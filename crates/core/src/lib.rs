@@ -3,6 +3,7 @@ pub mod builtin_samples;
 pub mod dsp;
 pub mod error;
 pub mod lexer;
+pub mod midi;
 pub mod mixer;
 pub mod parser;
 pub mod pattern;
