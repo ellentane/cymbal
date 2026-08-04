@@ -1,0 +1,8 @@
+-- bundled kit: builtin samples resolve without local files
+tempo 120
+
+loop "kit":
+    sample "kick" << "x . . x . . x ."
+    sample "snare" << ". . . x . . . x"
+    sample "hat"   << "x . x . x . x ." pan=-0.5
+    sample "clap"  << ". . . . x . . ." reverb=0.5

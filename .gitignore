@@ -3,3 +3,5 @@
 /.worktrees/
 *.wav
 !crates/core/tests/data/
+
+!assets/samples/*.wav

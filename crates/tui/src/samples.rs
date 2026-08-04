@@ -13,13 +13,19 @@ pub fn load_samples(
     let mut out = HashMap::new();
     for path in sample_paths(program) {
         let full = base_dir.join(&path);
-        let bytes = std::fs::read(&full).map_err(|e| {
-            Error::new(
-                Span { line: 0, col: 0 },
-                ErrorKind::Io,
-                format!("cannot read {}: {e}", full.display()),
-            )
-        })?;
+        let bytes = match std::fs::read(&full) {
+            Ok(b) => b,
+            Err(read_err) => match cymbal_core::builtin_samples::builtin(&path) {
+                Some(b) => b.to_vec(),
+                None => {
+                    return Err(Error::new(
+                        Span { line: 0, col: 0 },
+                        ErrorKind::Io,
+                        format!("cannot read {}: {}", full.display(), read_err),
+                    ));
+                }
+            },
+        };
         let data = cymbal_core::wav::decode_wav(&bytes)
             .map_err(|e| Error::new(e.span, e.kind, format!("{}: {e}", full.display())))?;
         out.insert(path, Arc::new(data));
