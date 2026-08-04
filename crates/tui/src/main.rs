@@ -100,6 +100,12 @@ pub fn build_timeline_with(
     )
 }
 
+fn render_src(src: &str, base_dir: &std::path::Path, max_samples: u64) -> Result<Vec<f32>, Error> {
+    let program = parse(&lex(src)?)?;
+    let samples = samples::load_samples(&program, base_dir)?;
+    cymbal_core::render::render_offline(src, max_samples, SAMPLE_RATE, &samples)
+}
+
 fn render_to_wav(
     input: &std::path::Path,
     output: &std::path::Path,
@@ -108,11 +114,9 @@ fn render_to_wav(
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let max_samples = seconds.saturating_mul(SAMPLE_RATE as u64).min(MAX_SAMPLES);
-    let program = parse(&lex(&src).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let base = input.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let samples = samples::load_samples(&program, base).map_err(|e| e.to_string())?;
-    let samples_out = cymbal_core::render::render_offline(&src, max_samples, SAMPLE_RATE, &samples)
-        .map_err(|e| format!("render failed: {e}"))?;
+    let samples_out =
+        render_src(&src, base, max_samples).map_err(|e| format!("render failed: {e}"))?;
     cymbal_core::wav::write_wav(output, &samples_out, SAMPLE_RATE)
         .map_err(|e| format!("cannot write {}: {e}", output.display()))
 }
@@ -328,14 +332,10 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 .parent()
                                 .map(|p| p.join("out.wav"))
                                 .unwrap_or_else(|| std::path::PathBuf::from("out.wav"));
+                            let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                             let tx = msg_tx.clone();
                             std::thread::spawn(move || {
-                                match cymbal_core::render::render_offline(
-                                    &src,
-                                    MAX_SAMPLES,
-                                    SAMPLE_RATE,
-                                    &std::collections::HashMap::new(),
-                                ) {
+                                match render_src(&src, &base, MAX_SAMPLES) {
                                     Ok(samples) => {
                                         match cymbal_core::wav::write_wav(
                                             &out_path,
@@ -532,6 +532,24 @@ mod tests {
         assert_eq!(std::fs::metadata(&out_path).unwrap().len(), 48000 * 4 + 44);
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn render_src_loads_samples_from_base_dir() {
+        let dir = std::env::temp_dir();
+        let sample_path = dir.join(format!("cymbal_rs_smp_{}.wav", std::process::id()));
+        std::fs::write(
+            &sample_path,
+            cymbal_core::wav::encode_wav(&[0.5, -0.5, 0.25], 48000, 1),
+        )
+        .unwrap();
+        let src = format!(
+            "loop \"b\":\n    sample \"{}\" << \"x\"\n",
+            sample_path.file_name().unwrap().to_str().unwrap()
+        );
+        let samples = render_src(&src, &dir, 48000).unwrap();
+        assert!(!samples.is_empty());
+        let _ = std::fs::remove_file(&sample_path);
     }
 
     #[test]
