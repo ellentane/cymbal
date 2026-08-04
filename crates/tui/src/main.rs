@@ -75,8 +75,13 @@ fn render_to_wav(
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let max_samples = seconds.saturating_mul(SAMPLE_RATE as u64).min(MAX_SAMPLES);
-    let samples = cymbal_core::render::render_offline(&src, max_samples, SAMPLE_RATE)
-        .map_err(|e| format!("render failed: {e}"))?;
+    let samples = cymbal_core::render::render_offline(
+        &src,
+        max_samples,
+        SAMPLE_RATE,
+        &std::collections::HashMap::new(),
+    )
+    .map_err(|e| format!("render failed: {e}"))?;
     cymbal_core::wav::write_wav(output, &samples, SAMPLE_RATE)
         .map_err(|e| format!("cannot write {}: {e}", output.display()))
 }
@@ -206,6 +211,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                     &src,
                                     MAX_SAMPLES,
                                     SAMPLE_RATE,
+                                    &std::collections::HashMap::new(),
                                 ) {
                                     Ok(samples) => {
                                         match cymbal_core::wav::write_wav(
@@ -373,7 +379,7 @@ mod tests {
             .unwrap();
         }
         render_to_wav(&src_path, &out_path, 1).unwrap();
-        assert_eq!(std::fs::metadata(&out_path).unwrap().len(), 48000 * 2 + 44);
+        assert_eq!(std::fs::metadata(&out_path).unwrap().len(), 48000 * 4 + 44);
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
     }

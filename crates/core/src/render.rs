@@ -1,33 +1,54 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::dsp::Voice;
 use crate::error::Result;
 use crate::lexer::lex;
+use crate::mixer::{Master, VoiceOutput};
 use crate::parser::parse;
-use crate::scheduler::schedule;
+use crate::scheduler::{SampleData, schedule};
 
-pub fn render_offline(src: &str, max_samples: u64, sample_rate: u32) -> Result<Vec<f32>> {
+pub fn render_offline(
+    src: &str,
+    max_samples: u64,
+    sample_rate: u32,
+    samples: &HashMap<String, Arc<SampleData>>,
+) -> Result<Vec<f32>> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
-    let timeline = schedule(
-        &program,
-        &std::collections::HashMap::new(),
-        &std::collections::HashMap::new(),
-        max_samples,
-        sample_rate,
-    )?;
-    let mut out = vec![0.0f32; max_samples as usize];
-    for ev in &timeline.events {
-        let mut voice = Voice::new(ev.voice, ev.pitch, ev.sample.clone(), ev.semitone);
-        let start = ev.sample_offset as usize;
-        let end = (start + ev.duration as usize).min(out.len());
-        for slot in out.iter_mut().take(end).skip(start) {
-            match voice.next_sample(sample_rate) {
-                Some(s) => *slot += s,
-                None => break,
+    let timeline = schedule(&program, &HashMap::new(), samples, max_samples, sample_rate)?;
+    let mut master = Master::new(sample_rate, timeline.bar_samples);
+    let mut out = vec![0.0f32; max_samples as usize * 2];
+    let events = timeline.events;
+    let mut idx = 0usize;
+    let mut active: Vec<(u64, Voice, crate::scheduler::Event)> = Vec::new();
+    for frame in 0..max_samples {
+        master.begin_frame();
+        while idx < events.len() && events[idx].sample_offset <= frame {
+            let ev = events[idx].clone();
+            idx += 1;
+            active.push((
+                frame + ev.duration,
+                Voice::new(ev.voice, ev.pitch, ev.sample.clone(), ev.semitone),
+                ev,
+            ));
+        }
+        active.retain(|(until, _, _)| *until > frame);
+        for (_, voice, ev) in &mut active {
+            if let Some(s) = voice.next_sample(sample_rate) {
+                master.add_voice(VoiceOutput {
+                    sample: s,
+                    velocity: ev.velocity,
+                    pan: ev.pan,
+                    delay_send: ev.delay_send,
+                    reverb_send: ev.reverb_send,
+                });
             }
         }
-    }
-    for s in &mut out {
-        *s = s.tanh();
+        let mut frame_out = [0.0f32; 2];
+        master.end_frame(&mut frame_out);
+        out[frame as usize * 2] = frame_out[0];
+        out[frame as usize * 2 + 1] = frame_out[1];
     }
     Ok(out)
 }
@@ -36,36 +57,81 @@ pub fn render_offline(src: &str, max_samples: u64, sample_rate: u32) -> Result<V
 mod tests {
     use super::*;
     use crate::error::ErrorKind;
+    use crate::scheduler::SampleData;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn render(src: &str, max_samples: u64) -> Vec<f32> {
+        render_offline(src, max_samples, 48000, &HashMap::new()).unwrap()
+    }
 
     #[test]
     fn renders_deterministically() {
         let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . . x . . x .\"\n";
-        let a = render_offline(src, 384000, 48000).unwrap();
-        let b = render_offline(src, 384000, 48000).unwrap();
+        let a = render(src, 384000);
+        let b = render(src, 384000);
         assert_eq!(a, b);
     }
 
     #[test]
+    fn output_is_stereo_interleaved() {
+        let out = render("", 100);
+        assert_eq!(out.len(), 200, "2 channels");
+    }
+
+    #[test]
     fn empty_program_is_digital_black() {
-        let out = render_offline("", 48000, 48000).unwrap();
+        let out = render("", 48000);
         assert!(out.iter().all(|s| *s == 0.0));
     }
 
     #[test]
     fn all_samples_are_finite() {
         let src = "tempo 120\nlet kick = kick()\nlet snare = snare()\nlet hat = hat()\nlet bass = bass()\nlet lead = lead()\nloop \"b\":\n    kick << \"x . . x . . x .\"\n    snare << \"x\" >> every(4, rev)\n    hat << \"x . x . x . x .\"\n    bass << ([c2, f2], \"x . . x\")\n    lead << [c4, e4, g4] >> rev\n";
-        let out = render_offline(src, 384000, 48000).unwrap();
+        let out = render(src, 384000);
         assert!(out.iter().all(|s| s.is_finite()));
         let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
         assert!(peak > 0.1);
     }
 
     #[test]
+    fn pan_places_signal_off_center() {
+        let src = "let lead = lead()\nloop \"b\":\n    lead << [c4] pan=1.0\n";
+        let out = render(src, 48000);
+        let l = out[2000];
+        let r = out[2001];
+        assert!(
+            r.abs() > l.abs() * 10.0,
+            "pan=1 must favor right: l={l} r={r}"
+        );
+    }
+
+    #[test]
+    fn sample_renders_and_downmixed_mono_ok() {
+        let frames: Vec<f32> = vec![1.0; 48000];
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let src = "loop \"b\":\n    sample \"kick.wav\" << \"x\" pan=-1.0\n";
+        let out = render_offline(src, 48000, 48000, &samples).unwrap();
+        assert!(out[0].abs() > 0.1, "sample should be audible on left");
+        assert!(out[1].abs() < 0.01, "pan=-1 keeps it off the right");
+    }
+
+    #[test]
     fn error_propagates() {
         assert_eq!(
-            render_offline("loop \"a\":\n    kick << \"x y\"\n", 48000, 48000)
-                .unwrap_err()
-                .kind,
+            render_offline(
+                "loop \"a\":\n    kick << \"x y\"\n",
+                48000,
+                48000,
+                &HashMap::new()
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::Parse
         );
     }

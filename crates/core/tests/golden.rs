@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use cymbal_core::render::render_offline;
 use cymbal_core::wav::encode_wav;
 
@@ -13,7 +15,7 @@ fn decode_pcm16(wav: &[u8]) -> Vec<i16> {
 }
 
 fn assert_audio_matches(rendered: &[f32], golden: &[u8]) {
-    let rendered = encode_wav(rendered, 48000, 1);
+    let rendered = encode_wav(rendered, 48000, 2);
     let rendered = decode_pcm16(&rendered);
     let golden = decode_pcm16(golden);
     assert_eq!(rendered.len(), golden.len(), "sample count mismatch");
@@ -34,13 +36,13 @@ fn assert_audio_matches(rendered: &[f32], golden: &[u8]) {
 #[test]
 fn beat_cym_matches_golden() {
     let src = include_str!("../../../examples/beat.cym");
-    let samples = render_offline(src, 384000, 48000).unwrap();
+    let samples = render_offline(src, 384000, 48000, &HashMap::new()).unwrap();
     assert_audio_matches(&samples, include_bytes!("data/beat.golden.wav"));
 }
 
 #[test]
 fn beat_cym_full_matches_golden() {
     let src = include_str!("../../../examples/beat.cym");
-    let samples = render_offline(src, 768000, 48000).unwrap();
+    let samples = render_offline(src, 768000, 48000, &HashMap::new()).unwrap();
     assert_audio_matches(&samples, include_bytes!("data/beat_full.golden.wav"));
 }
