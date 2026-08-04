@@ -99,12 +99,30 @@ fn writer_loop(tx: Arc<MidiOut>, mut conn: midir::MidiOutputConnection) {
                     next_pulse = Some(Instant::now() + pulse_period);
                 }
                 MidiItem::Note { offset, bytes } => {
-                    if let (Some(o0), Some(t0)) = (origin_offset, origin_time) {
-                        let delay = (offset as f64 - o0 as f64).max(0.0) / 48000.0;
-                        let target = t0 + Duration::from_secs_f64(delay);
+                    let target = match (origin_offset, origin_time) {
+                        (Some(o0), Some(t0)) => {
+                            let delay = (offset as f64 - o0 as f64).max(0.0) / 48000.0;
+                            t0 + Duration::from_secs_f64(delay)
+                        }
+                        _ => Instant::now(),
+                    };
+                    loop {
                         let now = Instant::now();
-                        if target > now {
-                            std::thread::sleep(target - now);
+                        if now >= target {
+                            break;
+                        }
+                        let wake = match next_pulse {
+                            Some(p) => target.min(p),
+                            None => target,
+                        };
+                        if wake > now {
+                            std::thread::sleep(wake - now);
+                        }
+                        if let Some(next) = next_pulse
+                            && Instant::now() >= next
+                        {
+                            let _ = conn.send(&[0xF8]);
+                            next_pulse = Some(next + pulse_period);
                         }
                     }
                     let _ = conn.send(&bytes);

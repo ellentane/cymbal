@@ -292,87 +292,99 @@ fn alt_transform_kind(code: KeyCode) -> Option<cymbal_core::transform::Transform
     }
 }
 
+type ParsedArgs<'a> = (
+    Option<String>,
+    Option<(&'a str, &'a str, Option<&'a str>)>,
+    Option<&'a str>,
+);
+
+fn parse_args(args: &[String]) -> ParsedArgs<'_> {
+    // returns (midi_port, render args (input, output, seconds), tui file)
+    let mut it = args.iter().map(String::as_str);
+    let first = it.next();
+    match first {
+        Some("--midi") => {
+            let rest: Vec<&str> = it.collect();
+            // "" means "first available port". An explicit port must be
+            // followed by "render" or a file; a lone argument is the file.
+            // (A port literally named "render" is misparsed — documented.)
+            let (port, rest) = match rest.first() {
+                Some(&"render") | None => (Some(String::new()), rest),
+                Some(_) if rest.len() == 1 => (Some(String::new()), rest),
+                Some(&p) => (Some(p.to_string()), rest[1..].to_vec()),
+            };
+            match rest.as_slice() {
+                ["render", input, output] => (port, Some((input, output, None)), None),
+                ["render", "--f32", input, output] => (port, Some((input, output, None)), None),
+                [file] => (port, None, Some(file)),
+                _ => (port, None, None),
+            }
+        }
+        Some("render") => {
+            let rest: Vec<&str> = it.collect();
+            match rest.as_slice() {
+                [input, output] => (None, Some((input, output, None)), None),
+                ["--f32", input, output] => (None, Some((input, output, None)), None),
+                [input, output, seconds] => (None, Some((input, output, Some(seconds))), None),
+                _ => (None, None, None),
+            }
+        }
+        Some(file) => (None, None, Some(file)),
+        None => (None, None, None),
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match args.as_slice() {
-        ["render", "--f32", input, output] => {
-            match render_to_wav_f32(
+    let (midi_port, render, tui_file) = parse_args(&args);
+    if let Some((input, output, seconds)) = render {
+        let seconds = match seconds {
+            None => RENDER_DEFAULT_SECONDS,
+            Some(s) => match s.parse::<u64>() {
+                Ok(s) if s > 0 => s,
+                _ => {
+                    eprintln!("invalid seconds: {s}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            },
+        };
+        let result = if args.iter().any(|a| a == "--f32") {
+            render_to_wav_f32(
                 std::path::Path::new(input),
                 std::path::Path::new(output),
-                RENDER_DEFAULT_SECONDS,
-            ) {
-                Ok(()) => std::process::ExitCode::SUCCESS,
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    std::process::ExitCode::FAILURE
-                }
-            }
-        }
-        ["render", "--f32", input, output, seconds] => match seconds.parse::<u64>() {
-            Ok(s) if s > 0 => {
-                match render_to_wav_f32(
-                    std::path::Path::new(input),
-                    std::path::Path::new(output),
-                    s,
-                ) {
-                    Ok(()) => std::process::ExitCode::SUCCESS,
-                    Err(msg) => {
-                        eprintln!("{msg}");
-                        std::process::ExitCode::FAILURE
-                    }
-                }
-            }
-            _ => {
-                eprintln!("invalid seconds: {seconds}");
-                std::process::ExitCode::FAILURE
-            }
-        },
-        ["render", input, output] => {
-            match render_to_wav(
+                seconds,
+            )
+        } else {
+            render_to_wav(
                 std::path::Path::new(input),
                 std::path::Path::new(output),
-                RENDER_DEFAULT_SECONDS,
-            ) {
-                Ok(()) => std::process::ExitCode::SUCCESS,
-                Err(msg) => {
-                    eprintln!("{msg}");
-                    std::process::ExitCode::FAILURE
-                }
-            }
-        }
-        ["render", input, output, seconds] => match seconds.parse::<u64>() {
-            Ok(s) if s > 0 => {
-                match render_to_wav(std::path::Path::new(input), std::path::Path::new(output), s) {
-                    Ok(()) => std::process::ExitCode::SUCCESS,
-                    Err(msg) => {
-                        eprintln!("{msg}");
-                        std::process::ExitCode::FAILURE
-                    }
-                }
-            }
-            _ => {
-                eprintln!("invalid seconds: {seconds}");
-                std::process::ExitCode::FAILURE
-            }
-        },
-        [file] => match run_tui(std::path::Path::new(file)) {
+                seconds,
+            )
+        };
+        return match result {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("{msg}");
                 std::process::ExitCode::FAILURE
             }
-        },
-        _ => {
-            eprintln!(
-                "usage: cymbal <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]"
-            );
-            std::process::ExitCode::from(2)
-        }
+        };
     }
+    if let Some(file) = tui_file {
+        return match run_tui(std::path::Path::new(file), midi_port) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    eprintln!(
+        "usage: cymbal [--midi [port]] <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]"
+    );
+    std::process::ExitCode::from(2)
 }
 
-fn run_tui(file: &std::path::Path) -> Result<(), String> {
+fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), String> {
     let src = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
 
@@ -383,14 +395,33 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
     let mut latest_loops: HashMap<String, u64> = initial.loop_generations.iter().cloned().collect();
     let mut status = Status::new();
     status.loops = initial.loops.clone();
-    let handle =
-        match cymbal_audio::stream::start_audio(queue.clone(), Arc::new(initial), |_e| {}, None) {
-            Ok(h) => Some(h),
-            Err(e) => {
-                status.set_error(e.into_error().to_string());
+    let midi_out = match &midi_port {
+        Some(port) => {
+            let name = port.as_str();
+            if cymbal_audio::midi_out::MidiOut::port_available(name) {
+                let out = cymbal_audio::midi_out::MidiOut::new(1024);
+                out.clone().spawn_writer(name);
+                status.midi_port = midi_port.clone();
+                Some(out)
+            } else {
+                status.set_error(format!("midi unavailable: no port named '{port}'"));
                 None
             }
-        };
+        }
+        None => None,
+    };
+    let handle = match cymbal_audio::stream::start_audio(
+        queue.clone(),
+        Arc::new(initial),
+        |_e| {},
+        midi_out,
+    ) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            status.set_error(e.into_error().to_string());
+            None
+        }
+    };
     status.latency_ms = handle.as_ref().and_then(|h| h.latency_ms);
     status.device_rate = handle.as_ref().map(|h| h.device_rate);
 

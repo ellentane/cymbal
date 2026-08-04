@@ -5,6 +5,7 @@ pub struct Status {
     pub loops: Vec<String>,
     pub latency_ms: Option<f32>,
     pub device_rate: Option<u32>,
+    pub midi_port: Option<String>,
     pub recording: bool,
     pub record_elapsed_secs: u64,
     pub error: Option<String>,
@@ -19,6 +20,7 @@ impl Status {
             loops: Vec::new(),
             latency_ms: None,
             device_rate: None,
+            midi_port: None,
             recording: false,
             record_elapsed_secs: 0,
             error: None,
@@ -47,10 +49,15 @@ impl Status {
         } else {
             "rec -".into()
         };
+        let midi = self
+            .midi_port
+            .as_deref()
+            .map(|p| format!("midi {p}"))
+            .unwrap_or_else(|| "midi -".into());
         let msg = self.error.clone().unwrap_or_else(|| self.message.clone());
         format!(
-            "tempo {:.0} | bar {} | loops {} | lat {} | {} | {} | {}",
-            self.tempo, self.bar, loops, lat, rate, rec, msg
+            "tempo {:.0} | bar {} | loops {} | lat {} | {} | {} | {} | {}",
+            self.tempo, self.bar, loops, lat, rate, midi, rec, msg
         )
     }
 
@@ -101,7 +108,7 @@ mod tests {
         s.latency_ms = Some(5.3333335);
         assert_eq!(
             s.render(),
-            "tempo 120 | bar 0 | loops b, h | lat ~5.3ms | - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
+            "tempo 120 | bar 0 | loops b, h | lat ~5.3ms | - | midi - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
         );
     }
 
@@ -110,7 +117,7 @@ mod tests {
         let s = Status::new();
         assert_eq!(
             s.render(),
-            "tempo 120 | bar 0 | loops - | lat - | - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
+            "tempo 120 | bar 0 | loops - | lat - | - | midi - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
         );
     }
 
@@ -133,6 +140,13 @@ mod tests {
     fn render_shows_not_recording() {
         let s = Status::new();
         assert!(s.render().contains("rec -"));
+    }
+
+    #[test]
+    fn render_shows_midi_port() {
+        let mut s = Status::new();
+        s.midi_port = Some("UM-1".into());
+        assert!(s.render().contains("midi UM-1"));
     }
 
     #[test]

@@ -283,6 +283,7 @@ impl Engine {
                 self.midi_events
                     .push((self.timeline_origin + ev.sample_offset, ev.bytes));
             }
+            self.midi_events.sort_by_key(|(o, _)| *o);
             if !tl.midi.is_empty()
                 && let Some(m) = &self.midi
             {
