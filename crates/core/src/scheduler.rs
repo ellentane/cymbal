@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::{Combinator, Expr, Program, Stmt, VoiceKind};
+use crate::ast::{Combinator, Expr, Param, Program, Stmt, VoiceKind};
 use crate::error::{Error, ErrorKind, Result};
 use crate::pattern;
 use crate::pattern::bar_triggers;
@@ -144,11 +144,20 @@ pub fn schedule(
                 }
                 for (step_idx, step) in steps_vec.into_iter().enumerate() {
                     let Some(step) = step else { continue };
-                    let offset = bar_idx * bar + step_idx as u64 * step_samples;
+                    let mut offset = bar_idx * bar + step_idx as u64 * step_samples;
+                    if let Some(swing) = bind.swing
+                        && steps.is_multiple_of(2)
+                        && step_idx % 2 == 1
+                    {
+                        let shifted = offset as i64 + (swing * step_samples as f32).round() as i64;
+                        let bar_start = (bar_idx * bar) as i64;
+                        offset = shifted.clamp(bar_start, bar_start + bar as i64 - 1) as u64;
+                    }
                     if offset >= max_samples {
                         continue;
                     }
-                    let velocity = (step.velocity * bind.vel.unwrap_or(1.0)).clamp(0.0, 1.0);
+                    let velocity = (step.velocity * resolve_param(&bind.vel, 1.0, step_idx, steps))
+                        .clamp(0.0, 1.0);
                     let duration = match voice {
                         VoiceKind::Sample => {
                             let data = sample_data.as_ref().unwrap();
@@ -173,12 +182,30 @@ pub fn schedule(
                         velocity,
                         duration,
                         generation,
-                        pan: bind.pan.unwrap_or(0.0),
-                        delay_send: bind.delay_send.unwrap_or(0.0),
-                        reverb_send: bind.reverb_send.unwrap_or(0.0),
-                        bass: 0.0,
-                        treble: 0.0,
-                        comp: 0.0,
+                        pan: resolve_param(&bind.pan, 0.0, step_idx, steps),
+                        delay_send: resolve_param(&bind.delay_send, 0.0, step_idx, steps),
+                        reverb_send: resolve_param(&bind.reverb_send, 0.0, step_idx, steps),
+                        bass: bind
+                            .bass
+                            .and_then(|p| match p {
+                                Param::Const(v) => Some(v),
+                                _ => None,
+                            })
+                            .unwrap_or(0.0),
+                        treble: bind
+                            .treble
+                            .and_then(|p| match p {
+                                Param::Const(v) => Some(v),
+                                _ => None,
+                            })
+                            .unwrap_or(0.0),
+                        comp: bind
+                            .comp
+                            .and_then(|p| match p {
+                                Param::Const(v) => Some(v),
+                                _ => None,
+                            })
+                            .unwrap_or(0.0),
                         sample: sample_data.clone(),
                     });
                 }
@@ -210,6 +237,20 @@ pub fn sample_paths(program: &Program) -> Vec<String> {
         }
     }
     out
+}
+
+fn resolve_param(p: &Option<Param>, default: f32, step_idx: usize, steps: usize) -> f32 {
+    match p {
+        None => default,
+        Some(Param::Const(v)) => *v,
+        Some(Param::Ramp(a, b)) => {
+            if steps <= 1 {
+                *b
+            } else {
+                (*a as f64 + (*b as f64 - *a as f64) * step_idx as f64 / (steps - 1) as f64) as f32
+            }
+        }
+    }
 }
 
 fn apply_combinator(
@@ -637,5 +678,84 @@ mod tests {
             tl.loop_generations,
             vec![("b".to_string(), shared), ("h".to_string(), shared)]
         );
+    }
+
+    #[test]
+    fn ramp_params_resolve_per_step() {
+        let tl = src2timeline_v11(
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x x x x\" pan=0:1 vel=1:0\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            96000,
+        );
+        let pans: Vec<f32> = tl.events.iter().map(|e| e.pan).collect();
+        let vels: Vec<f32> = tl.events.iter().map(|e| e.velocity).collect();
+        assert_eq!(pans, vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+        assert_eq!(vels, vec![1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0]);
+    }
+
+    #[test]
+    fn single_step_ramp_uses_end_value() {
+        let tl = src2timeline_v11(
+            "let kick = kick()\nloop \"b\":\n    kick << \"x\" pan=0:1\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        assert_eq!(tl.events[0].pan, 1.0);
+    }
+
+    #[test]
+    fn tone_params_reach_events() {
+        let tl = src2timeline_v11(
+            "let kick = kick()\nloop \"b\":\n    kick << \"x\" bass=0.5 treble=0.25 comp=0.1\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        assert_eq!(tl.events[0].bass, 0.5);
+        assert_eq!(tl.events[0].treble, 0.25);
+        assert_eq!(tl.events[0].comp, 0.1);
+    }
+
+    #[test]
+    fn swing_delays_off_beats() {
+        // 8 steps at 480bpm/48k: bar 24000, step 3000; swing 0.25 -> odd steps +750.
+        let tl = src2timeline_v11(
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \"x x x x x x x x\" swing=0.25\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(
+            offsets,
+            vec![0, 3750, 6000, 9750, 12000, 15750, 18000, 21750]
+        );
+    }
+
+    #[test]
+    fn swing_shifts_off_beat_hits() {
+        // ". x . x" hits on odd steps 1,3 -> 6000 and 18000 at bar 24000, step 6000; swing 0.25 -> +1500.
+        let tl = src2timeline_v11(
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \". x . x\" swing=0.25\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(offsets, vec![7500, 19500]);
+    }
+
+    #[test]
+    fn swing_leaves_even_steps_alone() {
+        let tl = src2timeline_v11(
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" swing=0.5\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(offsets, vec![0, 12000]);
     }
 }

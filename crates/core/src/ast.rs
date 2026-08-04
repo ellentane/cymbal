@@ -31,15 +31,25 @@ pub enum Combinator {
     Every(u64, Box<Combinator>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Param {
+    Const(f32),
+    Ramp(f32, f32),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BindStmt {
     pub voice: Expr,
     pub pattern: Expr,
     pub combinators: Vec<Combinator>,
-    pub pan: Option<f32>,
-    pub vel: Option<f32>,
-    pub delay_send: Option<f32>,
-    pub reverb_send: Option<f32>,
+    pub pan: Option<Param>,
+    pub vel: Option<Param>,
+    pub delay_send: Option<Param>,
+    pub reverb_send: Option<Param>,
+    pub bass: Option<Param>,
+    pub treble: Option<Param>,
+    pub comp: Option<Param>,
+    pub swing: Option<f32>,
     pub span: Span,
 }
 

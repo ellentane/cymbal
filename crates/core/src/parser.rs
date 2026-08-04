@@ -1,6 +1,14 @@
-use crate::ast::{BindStmt, Combinator, Expr, LoopStmt, Note, Program, Stmt, VoiceKind};
+use crate::ast::{BindStmt, Combinator, Expr, LoopStmt, Note, Param, Program, Stmt, VoiceKind};
 use crate::error::{Error, ErrorKind, Result, Span};
 use crate::lexer::{Token, TokenKind};
+
+fn param_range(p: Option<Param>, lo: f32, hi: f32) -> bool {
+    match p {
+        None => true,
+        Some(Param::Const(v)) => (lo..=hi).contains(&v),
+        Some(Param::Ramp(a, b)) => (lo..=hi).contains(&a) && (lo..=hi).contains(&b),
+    }
+}
 
 pub fn parse(tokens: &[Token]) -> Result<Program> {
     debug_assert!(
@@ -34,6 +42,31 @@ impl<'a> Parser<'a> {
     fn skip_newlines(&mut self) {
         while self.peek_kind() == &TokenKind::Newline {
             self.pos += 1;
+        }
+    }
+
+    fn parse_param_value(&mut self) -> Result<Param> {
+        let TokenKind::Number(a) = self.peek_kind().clone() else {
+            return Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "expected number after parameter",
+            ));
+        };
+        self.advance();
+        if self.peek_kind() == &TokenKind::Colon {
+            self.advance();
+            let TokenKind::Number(b) = self.peek_kind().clone() else {
+                return Err(Error::new(
+                    self.span(),
+                    ErrorKind::Parse,
+                    "expected ramp end after ':'",
+                ));
+            };
+            self.advance();
+            Ok(Param::Ramp(a as f32, b as f32))
+        } else {
+            Ok(Param::Const(a as f32))
         }
     }
 
@@ -170,39 +203,61 @@ impl<'a> Parser<'a> {
         let mut vel = None;
         let mut delay_send = None;
         let mut reverb_send = None;
+        let mut bass = None;
+        let mut treble = None;
+        let mut comp = None;
+        let mut swing = None;
         while let TokenKind::Ident(name) = self.peek_kind().clone() {
-            let param = match name.as_str() {
-                "pan" | "vel" | "delay" | "reverb" => {
-                    let pspan = self.span();
-                    self.advance();
-                    if self.peek_kind() != &TokenKind::Assign {
-                        return Err(Error::new(
-                            self.span(),
-                            ErrorKind::Parse,
-                            "expected '=' after parameter",
-                        ));
-                    }
-                    self.advance();
-                    let TokenKind::Number(n) = self.peek_kind().clone() else {
-                        return Err(Error::new(
-                            self.span(),
-                            ErrorKind::Parse,
-                            "expected number after parameter",
-                        ));
-                    };
-                    self.advance();
-                    (name.as_str().to_string(), n, pspan)
+            if name.as_str() == "swing" {
+                let pspan = self.span();
+                self.advance();
+                if self.peek_kind() != &TokenKind::Assign {
+                    return Err(Error::new(
+                        self.span(),
+                        ErrorKind::Parse,
+                        "expected '=' after parameter",
+                    ));
                 }
-                _ => break,
-            };
-            let (name, n, pspan) = param;
+                self.advance();
+                let TokenKind::Number(n) = self.peek_kind().clone() else {
+                    return Err(Error::new(
+                        self.span(),
+                        ErrorKind::Parse,
+                        "expected number after parameter",
+                    ));
+                };
+                self.advance();
+                if swing.is_some() {
+                    return Err(Error::new(
+                        pspan,
+                        ErrorKind::Parse,
+                        "duplicate parameter 'swing'",
+                    ));
+                }
+                swing = Some(n as f32);
+                continue;
+            }
             let slot = match name.as_str() {
                 "pan" => &mut pan,
                 "vel" => &mut vel,
                 "delay" => &mut delay_send,
                 "reverb" => &mut reverb_send,
-                _ => unreachable!(),
+                "bass" => &mut bass,
+                "treble" => &mut treble,
+                "comp" => &mut comp,
+                _ => break,
             };
+            let pspan = self.span();
+            self.advance();
+            if self.peek_kind() != &TokenKind::Assign {
+                return Err(Error::new(
+                    self.span(),
+                    ErrorKind::Parse,
+                    "expected '=' after parameter",
+                ));
+            }
+            self.advance();
+            let value = self.parse_param_value()?;
             if slot.is_some() {
                 return Err(Error::new(
                     pspan,
@@ -210,7 +265,7 @@ impl<'a> Parser<'a> {
                     format!("duplicate parameter '{name}'"),
                 ));
             }
-            *slot = Some(n as f32);
+            *slot = Some(value);
         }
         if self.peek_kind() == &TokenKind::Pipe {
             return Err(Error::new(
@@ -219,19 +274,40 @@ impl<'a> Parser<'a> {
                 "parameters must come after combinators",
             ));
         }
-        if let Some(p) = pan
-            && !(-1.0..=1.0).contains(&p)
+        if let Some(swing) = swing
+            && !(0.0..=0.5).contains(&swing)
         {
+            return Err(Error::new(
+                span,
+                ErrorKind::Parse,
+                "swing must be in 0..=0.5",
+            ));
+        }
+        if !param_range(pan, -1.0, 1.0) {
             return Err(Error::new(span, ErrorKind::Parse, "pan must be in -1..=1"));
         }
-        for (name, v) in [("vel", vel), ("delay", delay_send), ("reverb", reverb_send)] {
-            if let Some(v) = v
-                && !(0.0..=1.0).contains(&v)
-            {
+        for (name, v) in [
+            ("vel", vel),
+            ("delay", delay_send),
+            ("reverb", reverb_send),
+            ("bass", bass),
+            ("treble", treble),
+            ("comp", comp),
+        ] {
+            if !param_range(v, 0.0, 1.0) {
                 return Err(Error::new(
                     span,
                     ErrorKind::Parse,
                     format!("{name} must be in 0..=1"),
+                ));
+            }
+        }
+        for (name, v) in [("bass", bass), ("treble", treble), ("comp", comp)] {
+            if matches!(v, Some(Param::Ramp(..))) {
+                return Err(Error::new(
+                    span,
+                    ErrorKind::Parse,
+                    format!("{name} does not support ramps"),
                 ));
             }
         }
@@ -243,6 +319,10 @@ impl<'a> Parser<'a> {
             vel,
             delay_send,
             reverb_send,
+            bass,
+            treble,
+            comp,
+            swing,
             span,
         })
     }
@@ -581,10 +661,10 @@ loop "beat" tempo=90:
             l.binds[0].voice,
             Expr::Sample("kick.wav".into(), Span { line: 2, col: 5 })
         );
-        assert_eq!(l.binds[0].pan, Some(0.7));
-        assert_eq!(l.binds[0].vel, Some(0.9));
-        assert_eq!(l.binds[0].delay_send, Some(0.3));
-        assert_eq!(l.binds[0].reverb_send, Some(0.2));
+        assert_eq!(l.binds[0].pan, Some(Param::Const(0.7)));
+        assert_eq!(l.binds[0].vel, Some(Param::Const(0.9)));
+        assert_eq!(l.binds[0].delay_send, Some(Param::Const(0.3)));
+        assert_eq!(l.binds[0].reverb_send, Some(Param::Const(0.2)));
     }
 
     #[test]
@@ -595,7 +675,7 @@ loop "beat" tempo=90:
             panic!()
         };
         assert_eq!(l.binds[0].combinators.len(), 1);
-        assert_eq!(l.binds[0].pan, Some(-0.5));
+        assert_eq!(l.binds[0].pan, Some(Param::Const(-0.5)));
     }
 
     #[test]
@@ -648,17 +728,40 @@ loop "beat" tempo=90:
 
     #[test]
     fn param_boundary_values_are_accepted() {
-        for src in [
-            "loop \"a\":\n    kick << \"x\" pan=1.0\n",
-            "loop \"a\":\n    kick << \"x\" pan=-1.0\n",
-            "loop \"a\":\n    kick << \"x\" vel=1.0\n",
-            "loop \"a\":\n    kick << \"x\" reverb=0\n",
+        for (src, field, expected) in [
+            (
+                "loop \"a\":\n    kick << \"x\" pan=1.0\n",
+                "pan",
+                Param::Const(1.0),
+            ),
+            (
+                "loop \"a\":\n    kick << \"x\" pan=-1.0\n",
+                "pan",
+                Param::Const(-1.0),
+            ),
+            (
+                "loop \"a\":\n    kick << \"x\" vel=1.0\n",
+                "vel",
+                Param::Const(1.0),
+            ),
+            (
+                "loop \"a\":\n    kick << \"x\" reverb=0\n",
+                "reverb",
+                Param::Const(0.0),
+            ),
         ] {
             let program = parse(&lex(src).unwrap()).unwrap();
             let Stmt::Loop(l) = &program.statements[0] else {
                 panic!()
             };
             assert_eq!(l.binds.len(), 1, "source: {src}");
+            let value = match field {
+                "pan" => l.binds[0].pan,
+                "vel" => l.binds[0].vel,
+                "reverb" => l.binds[0].reverb_send,
+                _ => unreachable!(),
+            };
+            assert_eq!(value, Some(expected), "source: {src}");
         }
     }
 
@@ -668,5 +771,76 @@ loop "beat" tempo=90:
             parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5 >> rev\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.message, "parameters must come after combinators");
+    }
+
+    #[test]
+    fn parses_ramp_params() {
+        let src =
+            "loop \"a\":\n    kick << \"x . x .\" pan=0:1 vel=1:0 delay=0.2:0.5 reverb=0:0.1\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert_eq!(l.binds[0].pan, Some(Param::Ramp(0.0, 1.0)));
+        assert_eq!(l.binds[0].vel, Some(Param::Ramp(1.0, 0.0)));
+        assert_eq!(l.binds[0].delay_send, Some(Param::Ramp(0.2, 0.5)));
+        assert_eq!(l.binds[0].reverb_send, Some(Param::Ramp(0.0, 0.1)));
+    }
+
+    #[test]
+    fn parses_tone_params() {
+        let src = "loop \"a\":\n    kick << \"x\" bass=0.5 treble=1 comp=0.25 swing=0.3\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert_eq!(l.binds[0].bass, Some(Param::Const(0.5)));
+        assert_eq!(l.binds[0].treble, Some(Param::Const(1.0)));
+        assert_eq!(l.binds[0].comp, Some(Param::Const(0.25)));
+        assert_eq!(l.binds[0].swing, Some(0.3));
+    }
+
+    #[test]
+    fn ramp_endpoints_validated() {
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:2\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" vel=1:-0.5\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:1:2\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+    }
+
+    #[test]
+    fn tone_params_reject_ramps_and_ranges() {
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" bass=0:1\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" comp=1.5\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    kick << \"x\" swing=0.6\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
     }
 }
