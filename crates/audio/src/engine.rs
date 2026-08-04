@@ -85,7 +85,11 @@ impl Engine {
                         until: s.at + e.duration,
                         loop_name: e.loop_name.clone(),
                         generation: e.generation,
-                        voice: Voice::new(e.voice, cymbal_core::dsp::VoiceParams::from_event(e)),
+                        voice: Voice::new(
+                            e.voice,
+                            cymbal_core::dsp::VoiceParams::from_event(e),
+                            self.sample_rate,
+                        ),
                         velocity: e.velocity,
                         pan: e.pan,
                         delay_send: e.delay_send,

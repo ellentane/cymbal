@@ -89,22 +89,23 @@ pub struct VoiceFx {
     comp: f64,
     lp: f64,
     env: f64,
+    lp_a: f64,
 }
 
 impl VoiceFx {
-    pub fn new(bass: f32, treble: f32, comp: f32) -> Self {
+    pub fn new(bass: f32, treble: f32, comp: f32, sr: u32) -> Self {
         Self {
             bass: 10f64.powf(12.0 * bass.clamp(0.0, 1.0) as f64 / 20.0),
             treble: 10f64.powf(12.0 * treble.clamp(0.0, 1.0) as f64 / 20.0),
             comp: comp.clamp(0.0, 1.0) as f64,
             lp: 0.0,
             env: 0.0,
+            lp_a: 1.0 - (-2.0 * std::f64::consts::PI * 200.0 / sr as f64).exp(),
         }
     }
 
-    fn apply(&mut self, x: f64, sr: u32) -> f32 {
-        let a = 1.0 - (-2.0 * std::f64::consts::PI * 200.0 / sr as f64).exp();
-        self.lp += a * (x - self.lp);
+    fn apply(&mut self, x: f64) -> f32 {
+        self.lp += self.lp_a * (x - self.lp);
         let lp = self.lp;
         let bass_out = x + (self.bass - 1.0) * lp;
         let out = bass_out + (self.treble - 1.0) * (bass_out - lp);
@@ -130,10 +131,10 @@ pub enum Voice {
 }
 
 impl Voice {
-    pub fn new(kind: VoiceKind, params: VoiceParams) -> Self {
+    pub fn new(kind: VoiceKind, params: VoiceParams, sr: u32) -> Self {
         use crate::scheduler::voice_default_duration;
         let dur = voice_default_duration(kind);
-        let fx = VoiceFx::new(params.bass, params.treble, params.comp);
+        let fx = VoiceFx::new(params.bass, params.treble, params.comp, sr);
         match kind {
             VoiceKind::Kick => Voice::Kick(Kick {
                 t: 0,
@@ -205,7 +206,7 @@ impl Sample {
         };
         self.pos += step;
         self.t += 1;
-        Some(self.fx.apply(out as f64, sr))
+        Some(self.fx.apply(out as f64))
     }
 }
 
@@ -238,7 +239,7 @@ impl Kick {
         let body = self.phase.sin() * (-ts / 0.09).exp() * 1.4 * att;
         let click = 0.2 * (2.0 * std::f64::consts::PI * 8000.0 * ts).sin() * (-ts / 0.005).exp();
         self.t += 1;
-        Some(self.fx.apply((body + click).tanh(), sr))
+        Some(self.fx.apply((body + click).tanh()))
     }
 }
 
@@ -252,7 +253,7 @@ impl Snare {
         let noise_part = noise(self.t) * (-ts / 0.04).exp() * 0.6 * att;
         let body = (2.0 * std::f64::consts::PI * 180.0 * ts).sin() * (-ts / 0.09).exp() * 0.4;
         self.t += 1;
-        Some(self.fx.apply((noise_part + body).tanh(), sr))
+        Some(self.fx.apply((noise_part + body).tanh()))
     }
 }
 
@@ -268,7 +269,7 @@ impl Hat {
         self.prev_noise = n;
         let s = hp * 0.5 * (-ts / 0.015).exp() * att;
         self.t += 1;
-        Some(self.fx.apply(s.tanh(), sr))
+        Some(self.fx.apply(s.tanh()))
     }
 }
 
@@ -287,7 +288,7 @@ impl Bass {
         };
         let filtered = lp(saw * env * 0.7, 500.0, 0.7, sr, &mut self.st);
         self.t += 1;
-        Some(self.fx.apply(filtered.tanh(), sr))
+        Some(self.fx.apply(filtered.tanh()))
     }
 }
 
@@ -306,7 +307,7 @@ impl Lead {
         };
         let filtered = lp(saw * env * 0.6, 2500.0, 1.2, sr, &mut self.st);
         self.t += 1;
-        Some(self.fx.apply(filtered.tanh(), sr))
+        Some(self.fx.apply(filtered.tanh()))
     }
 }
 
@@ -317,7 +318,7 @@ mod tests {
 
     fn render_all(kind: VoiceKind, pitch: Option<u8>) -> Vec<f32> {
         let dur = voice_default_duration(kind) as usize;
-        let mut v = Voice::new(kind, VoiceParams::default_for(kind, pitch));
+        let mut v = Voice::new(kind, VoiceParams::default_for(kind, pitch), 48000);
         let mut out = Vec::with_capacity(dur);
         while let Some(s) = v.next_sample(48000) {
             out.push(s);
@@ -385,6 +386,7 @@ mod tests {
         let mut v = Voice::new(
             VoiceKind::Hat,
             VoiceParams::default_for(VoiceKind::Hat, None),
+            48000,
         );
         let mut n = 0;
         while v.next_sample(48000).is_some() {
@@ -414,6 +416,7 @@ mod tests {
                 semitone,
                 ..VoiceParams::default_for(VoiceKind::Sample, None)
             },
+            48000,
         )
     }
 
@@ -501,7 +504,7 @@ mod tests {
             } else {
                 None
             };
-            let mut plain = Voice::new(kind, VoiceParams::default_for(kind, pitch));
+            let mut plain = Voice::new(kind, VoiceParams::default_for(kind, pitch), 48000);
             let mut fx = Voice::new(
                 kind,
                 VoiceParams {
@@ -510,6 +513,7 @@ mod tests {
                     comp: 0.0,
                     ..VoiceParams::default_for(kind, pitch)
                 },
+                48000,
             );
             loop {
                 let a = plain.next_sample(48000);
@@ -524,11 +528,11 @@ mod tests {
 
     #[test]
     fn bass_shelf_boosts_dc() {
-        let mut fx = VoiceFx::new(1.0, 0.0, 0.0);
-        let out = fx.apply(0.1, 48000);
-        let mut steady = fx.apply(0.1, 48000);
+        let mut fx = VoiceFx::new(1.0, 0.0, 0.0, 48000);
+        let out = fx.apply(0.1);
+        let mut steady = fx.apply(0.1);
         for _ in 0..2000 {
-            steady = fx.apply(0.1, 48000);
+            steady = fx.apply(0.1);
         }
         // bass=1.0 is a 12 dB shelf -> DC gain 10^(12/20) = 3.98x -> steady ~0.398
         assert!(steady > 0.3, "low shelf must boost DC content");
@@ -538,10 +542,10 @@ mod tests {
 
     #[test]
     fn treble_shelf_boosts_fast_content_only() {
-        let mut fx = VoiceFx::new(0.0, 1.0, 0.0);
+        let mut fx = VoiceFx::new(0.0, 1.0, 0.0, 48000);
         let mut steady = 0.0f32;
         for _ in 0..2000 {
-            steady = fx.apply(0.1, 48000);
+            steady = fx.apply(0.1);
         }
         assert!(
             (steady - 0.1).abs() < 1e-6,
@@ -551,10 +555,10 @@ mod tests {
 
     #[test]
     fn compressor_reduces_loud_signal() {
-        let mut fx = VoiceFx::new(0.0, 0.0, 1.0);
+        let mut fx = VoiceFx::new(0.0, 0.0, 1.0, 48000);
         let mut peak = 0.0f32;
         for _ in 0..48000 {
-            peak = peak.max(fx.apply(1.0, 48000));
+            peak = peak.max(fx.apply(1.0));
         }
         // constant 1.0 -> env 1.0, over 0.5, gain exactly 0.5
         assert!(peak < 1.0, "compression must pull 1.0 down: {peak}");

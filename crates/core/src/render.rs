@@ -29,7 +29,11 @@ pub fn render_offline(
             idx += 1;
             active.push((
                 frame + ev.duration,
-                Voice::new(ev.voice, crate::dsp::VoiceParams::from_event(&ev)),
+                Voice::new(
+                    ev.voice,
+                    crate::dsp::VoiceParams::from_event(&ev),
+                    sample_rate,
+                ),
                 ev,
             ));
         }
