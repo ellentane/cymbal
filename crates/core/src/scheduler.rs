@@ -49,6 +49,9 @@ pub struct Event {
     pub treble: f32,
     pub comp: f32,
     pub sample: Option<Arc<SampleData>>,
+    pub sample_start: f64,
+    pub sample_end: f64,
+    pub sample_loop: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -160,10 +163,27 @@ pub fn schedule(
                         VoiceKind::Sample => {
                             let data = sample_data.as_ref().unwrap();
                             let rate = 2f64.powf(step.semitone as f64 / 12.0);
-                            ((data.frames.len() as f64 * sample_rate as f64
-                                / data.sample_rate as f64)
-                                / rate)
-                                .ceil() as u64
+                            if let Some(Param::Const(d)) = bind.dur {
+                                (d as f64 * sample_rate as f64).round() as u64
+                            } else if bind.cycle.is_some() {
+                                max_samples - offset
+                            } else {
+                                let total = data.frames.len() as f64;
+                                let start =
+                                    resolve_param(&bind.start, 0.0, step_idx, steps) as f64 * total;
+                                let end =
+                                    resolve_param(&bind.end, 1.0, step_idx, steps) as f64 * total;
+                                if start >= end {
+                                    return Err(Error::new(
+                                        bind.span,
+                                        ErrorKind::Eval,
+                                        "sample start must be before end",
+                                    ));
+                                }
+                                (((end - start) * sample_rate as f64 / data.sample_rate as f64)
+                                    / rate)
+                                    .ceil() as u64
+                            }
                         }
                         _ => voice_default_duration(voice),
                     };
@@ -187,6 +207,9 @@ pub fn schedule(
                         treble: tone_value(&bind.treble),
                         comp: tone_value(&bind.comp),
                         sample: sample_data.clone(),
+                        sample_start: resolve_param(&bind.start, 0.0, step_idx, steps) as f64,
+                        sample_end: resolve_param(&bind.end, 1.0, step_idx, steps) as f64,
+                        sample_loop: bind.cycle.is_some(),
                     });
                 }
             }
@@ -286,9 +309,9 @@ mod tests {
         loop_generations: &HashMap<String, u64>,
         samples: &HashMap<String, Arc<SampleData>>,
         max_samples: u64,
-    ) -> Timeline {
+    ) -> Result<Timeline> {
         let program = parse(&lex(src).unwrap()).unwrap();
-        schedule(&program, loop_generations, samples, max_samples, 48000).unwrap()
+        schedule(&program, loop_generations, samples, max_samples, 48000)
     }
 
     #[test]
@@ -359,7 +382,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             96000,
-        );
+        )
+        .unwrap();
         let ev = &tl.events[0];
         assert_eq!(ev.velocity, 0.5 * 0.8);
         assert_eq!(ev.pan, 0.5);
@@ -379,7 +403,8 @@ mod tests {
             &gens,
             &HashMap::new(),
             96000,
-        );
+        )
+        .unwrap();
         assert_eq!(tl.generation, 4, "max generation");
         assert_eq!(
             tl.loop_generations,
@@ -406,7 +431,8 @@ mod tests {
             &HashMap::new(),
             &samples,
             96000,
-        );
+        )
+        .unwrap();
         let ev = &tl.events[0];
         assert_eq!(ev.voice, VoiceKind::Sample);
         assert!(ev.sample.is_some());
@@ -428,7 +454,8 @@ mod tests {
             &HashMap::new(),
             &samples,
             96000,
-        );
+        )
+        .unwrap();
         assert_eq!(
             tl.events[0].duration, 24000,
             "@12 = 2x rate = half duration"
@@ -625,7 +652,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             96000,
-        );
+        )
+        .unwrap();
         let kick = tl
             .events
             .iter()
@@ -653,7 +681,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             96000,
-        );
+        )
+        .unwrap();
         assert!(!tl.events.is_empty());
         let shared = tl.events[0].generation;
         assert!(
@@ -674,7 +703,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             96000,
-        );
+        )
+        .unwrap();
         let pans: Vec<f32> = tl.events.iter().map(|e| e.pan).collect();
         let vels: Vec<f32> = tl.events.iter().map(|e| e.velocity).collect();
         assert_eq!(pans, vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
@@ -688,7 +718,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         assert_eq!(tl.events[0].pan, 1.0);
     }
 
@@ -699,7 +730,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         assert_eq!(tl.events[0].bass, 0.5);
         assert_eq!(tl.events[0].treble, 0.25);
         assert_eq!(tl.events[0].comp, 0.1);
@@ -713,7 +745,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
         assert_eq!(
             offsets,
@@ -729,7 +762,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
         assert_eq!(offsets, vec![7500, 19500]);
     }
@@ -741,7 +775,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
         assert_eq!(offsets, vec![0, 12000]);
     }
@@ -754,7 +789,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
         assert_eq!(offsets, vec![0, 12000]);
         // "x . x ." -> rev -> hits at 1,3 (odd, swung +1500).
@@ -763,8 +799,88 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             24000,
-        );
+        )
+        .unwrap();
         let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
         assert_eq!(offsets, vec![7500, 19500]);
+    }
+
+    #[test]
+    fn sample_region_scales_duration() {
+        let frames: Vec<f32> = vec![0.0; 48000]; // 1s at 48k
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\" start=0.25 end=0.75\n",
+            &HashMap::new(),
+            &samples,
+            96000,
+        )
+        .unwrap();
+        assert_eq!(tl.events[0].duration, 24000, "half the file");
+        assert_eq!(tl.events[0].sample_start, 0.25);
+        assert_eq!(tl.events[0].sample_end, 0.75);
+    }
+
+    #[test]
+    fn sample_dur_overrides_duration() {
+        let frames: Vec<f32> = vec![0.0; 48000];
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\" dur=0.5\n",
+            &HashMap::new(),
+            &samples,
+            96000,
+        )
+        .unwrap();
+        assert_eq!(tl.events[0].duration, 24000, "0.5s at 48k");
+    }
+
+    #[test]
+    fn sample_cycle_runs_to_window_end() {
+        let frames: Vec<f32> = vec![0.0; 4800];
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\" cycle=1\n",
+            &HashMap::new(),
+            &samples,
+            48000,
+        )
+        .unwrap();
+        assert_eq!(tl.events[0].duration, 48000, "loops until the window end");
+        assert!(tl.events[0].sample_loop);
+    }
+
+    #[test]
+    fn sample_start_before_end_required() {
+        let frames: Vec<f32> = vec![0.0; 4800];
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let err = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\" start=0.8 end=0.2\n",
+            &HashMap::new(),
+            &samples,
+            48000,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Eval);
     }
 }

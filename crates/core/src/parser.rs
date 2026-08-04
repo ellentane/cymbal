@@ -207,6 +207,10 @@ impl<'a> Parser<'a> {
         let mut treble = None;
         let mut comp = None;
         let mut swing = None;
+        let mut start = None;
+        let mut end = None;
+        let mut dur = None;
+        let mut cycle = None;
         while let TokenKind::Ident(name) = self.peek_kind().clone() {
             let slot = match name.as_str() {
                 "pan" => &mut pan,
@@ -217,6 +221,10 @@ impl<'a> Parser<'a> {
                 "treble" => &mut treble,
                 "comp" => &mut comp,
                 "swing" => &mut swing,
+                "start" => &mut start,
+                "end" => &mut end,
+                "dur" => &mut dur,
+                "cycle" => &mut cycle,
                 _ => break,
             };
             let pspan = self.span();
@@ -263,6 +271,9 @@ impl<'a> Parser<'a> {
             ("bass", bass),
             ("treble", treble),
             ("comp", comp),
+            ("start", start),
+            ("end", end),
+            ("cycle", cycle),
         ] {
             if !param_range(v, 0.0, 1.0) {
                 return Err(Error::new(
@@ -272,11 +283,21 @@ impl<'a> Parser<'a> {
                 ));
             }
         }
+        if !param_range(dur, 0.0, 60.0) {
+            return Err(Error::new(span, ErrorKind::Parse, "dur must be in 0..=60"));
+        }
+        if matches!(dur, Some(Param::Const(0.0))) {
+            return Err(Error::new(span, ErrorKind::Parse, "dur must be > 0"));
+        }
         for (name, v) in [
             ("bass", bass),
             ("treble", treble),
             ("comp", comp),
             ("swing", swing),
+            ("start", start),
+            ("end", end),
+            ("dur", dur),
+            ("cycle", cycle),
         ] {
             if matches!(v, Some(Param::Ramp(..))) {
                 return Err(Error::new(
@@ -298,6 +319,10 @@ impl<'a> Parser<'a> {
             treble,
             comp,
             swing,
+            start,
+            end,
+            dur,
+            cycle,
             span,
         })
     }
@@ -824,5 +849,42 @@ loop "beat" tempo=90:
         let err = parse(&lex("loop \"a\":\n    kick << \"x\" swing=0:1\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err.message.contains("swing"));
+    }
+
+    #[test]
+    fn parses_sample_region_params() {
+        let src =
+            "loop \"a\":\n    sample \"kick.wav\" << \"x\" start=0.25 end=0.75 dur=0.2 cycle=1\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        let b = &l.binds[0];
+        assert_eq!(b.start, Some(Param::Const(0.25)));
+        assert_eq!(b.end, Some(Param::Const(0.75)));
+        assert_eq!(b.dur, Some(Param::Const(0.2)));
+        assert_eq!(b.cycle, Some(Param::Const(1.0)));
+    }
+
+    #[test]
+    fn sample_region_params_validated() {
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    sample \"k.wav\" << \"x\" start=1.5\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    sample \"k.wav\" << \"x\" dur=0\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
+        assert_eq!(
+            parse(&lex("loop \"a\":\n    sample \"k.wav\" << \"x\" cycle=2\n").unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Parse
+        );
     }
 }

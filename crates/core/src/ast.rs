@@ -50,6 +50,10 @@ pub struct BindStmt {
     pub treble: Option<Param>,
     pub comp: Option<Param>,
     pub swing: Option<Param>,
+    pub start: Option<Param>,
+    pub end: Option<Param>,
+    pub dur: Option<Param>,
+    pub cycle: Option<Param>,
     pub span: Span,
 }
 

@@ -44,8 +44,11 @@ pub struct Lead {
 pub struct Sample {
     data: Arc<SampleData>,
     pos: f64,
+    start: f64,
+    end: f64,
     rate: f64,
     t: u64,
+    cycle: bool,
     fx: VoiceFx,
 }
 
@@ -56,6 +59,9 @@ pub struct VoiceParams {
     pub bass: f32,
     pub treble: f32,
     pub comp: f32,
+    pub sample_start: f64,
+    pub sample_end: f64,
+    pub sample_cycle: bool,
 }
 
 impl VoiceParams {
@@ -68,6 +74,9 @@ impl VoiceParams {
             bass: 0.0,
             treble: 0.0,
             comp: 0.0,
+            sample_start: 0.0,
+            sample_end: 1.0,
+            sample_cycle: false,
         }
     }
 
@@ -79,6 +88,9 @@ impl VoiceParams {
             bass: e.bass,
             treble: e.treble,
             comp: e.comp,
+            sample_start: e.sample_start,
+            sample_end: e.sample_end,
+            sample_cycle: e.sample_loop,
         }
     }
 }
@@ -165,13 +177,22 @@ impl Voice {
                 dur,
                 fx,
             }),
-            VoiceKind::Sample => Voice::Sample(Sample {
-                data: params.sample.expect("sample voice requires sample data"),
-                pos: 0.0,
-                rate: 2f64.powf(params.semitone as f64 / 12.0),
-                t: 0,
-                fx,
-            }),
+            VoiceKind::Sample => {
+                let data = params.sample.expect("sample voice requires sample data");
+                let total = data.frames.len() as f64;
+                let start = params.sample_start.clamp(0.0, 1.0) * total;
+                let end = (params.sample_end.clamp(0.0, 1.0) * total).max(start);
+                Voice::Sample(Sample {
+                    data,
+                    pos: start,
+                    start,
+                    end,
+                    rate: 2f64.powf(params.semitone as f64 / 12.0),
+                    t: 0,
+                    cycle: params.sample_cycle,
+                    fx,
+                })
+            }
         }
     }
 
@@ -189,12 +210,16 @@ impl Voice {
 
 impl Sample {
     fn next_sample(&mut self, sr: u32) -> Option<f32> {
+        if self.pos >= self.end {
+            if self.cycle && self.end > self.start {
+                self.pos = self.start;
+            } else {
+                return None;
+            }
+        }
         let sr_ratio = sr as f64 / self.data.sample_rate as f64;
         let step = self.rate * sr_ratio;
         let i = self.pos.floor() as usize;
-        if i >= self.data.frames.len() {
-            return None;
-        }
         let out = if i + 1 >= self.data.frames.len() {
             // last frame: no look-ahead available, play it verbatim
             self.data.frames[i]
@@ -424,6 +449,24 @@ mod tests {
         sample_voice_at(frames, semitone, 48000)
     }
 
+    fn region_voice(frames: Vec<f32>, start: f64, end: f64, cycle: bool) -> Voice {
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        Voice::new(
+            VoiceKind::Sample,
+            VoiceParams {
+                sample: Some(Arc::new(data)),
+                sample_start: start,
+                sample_end: end,
+                sample_cycle: cycle,
+                ..VoiceParams::default_for(VoiceKind::Sample, None)
+            },
+            48000,
+        )
+    }
+
     #[test]
     fn sample_plays_through_and_exhausts() {
         let frames: Vec<f32> = (0..10).map(|i| i as f32 / 10.0).collect();
@@ -488,6 +531,32 @@ mod tests {
         let mut v = sample_voice(vec![0.25], 0);
         assert_eq!(v.next_sample(48000).unwrap(), 0.25);
         assert!(v.next_sample(48000).is_none());
+    }
+
+    #[test]
+    fn sample_region_starts_at_offset_and_ends() {
+        let frames: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let mut v = region_voice(frames, 0.25, 0.75, false);
+        let first = v.next_sample(48000).unwrap();
+        assert_eq!(first, 2.0, "starts at frame 2 of 8");
+        let mut n = 0;
+        while v.next_sample(48000).is_some() {
+            n += 1;
+        }
+        assert_eq!(
+            n, 3,
+            "frames 3, 4, 5 play (pos 3,4,5 < end 6), 2 played above"
+        );
+    }
+
+    #[test]
+    fn sample_cycle_wraps_region() {
+        let frames: Vec<f32> = (0..4).map(|i| i as f32).collect();
+        let mut v = region_voice(frames, 0.25, 0.75, true);
+        let s0 = v.next_sample(48000).unwrap();
+        let s1 = v.next_sample(48000).unwrap();
+        let s2 = v.next_sample(48000).unwrap();
+        assert_eq!((s0, s1, s2), (1.0, 2.0, 1.0), "wraps back to start");
     }
 
     #[test]
