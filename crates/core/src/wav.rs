@@ -19,6 +19,18 @@ pub enum WavFormat {
     F32,
 }
 
+pub fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 pub fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     encode_wav_with_format(samples, sample_rate, channels, WavFormat::Pcm16)
 }

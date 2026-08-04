@@ -170,6 +170,30 @@ fn render_to_wav_f32(
     render_to_wav_with(input, output, seconds, cymbal_core::wav::WavFormat::F32)
 }
 
+fn render_tracks_to_dir(
+    input: &std::path::Path,
+    out_dir: &std::path::Path,
+    seconds: u64,
+) -> Result<(), String> {
+    let src = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let max_samples = seconds.saturating_mul(SAMPLE_RATE as u64).min(MAX_SAMPLES);
+    let base = input.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let program = parse(&lex(&src).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let samples = samples::load_samples(&program, base).map_err(|e| e.to_string())?;
+    let tracks =
+        cymbal_core::render::render_offline_tracks(&src, max_samples, SAMPLE_RATE, &samples)
+            .map_err(|e| format!("render failed: {e}"))?;
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+    for (name, samples) in tracks {
+        let path = out_dir.join(format!("{}.wav", cymbal_core::wav::sanitize_name(&name)));
+        cymbal_core::wav::write_wav(&path, &samples, SAMPLE_RATE)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn apply_tempo_override(src: &str, tempo: f64) -> String {
     let mut lines: Vec<String> = src.lines().map(|s| s.to_string()).collect();
     let new_line = format!("tempo {tempo}");
@@ -199,18 +223,6 @@ fn free_path(dir: &std::path::Path, stem: &str) -> std::path::PathBuf {
 
 fn recording_path(dir: &std::path::Path, ts: &str) -> std::path::PathBuf {
     free_path(dir, &format!("recording-{ts}"))
-}
-
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 fn record_loop(
@@ -295,11 +307,12 @@ fn alt_transform_kind(code: KeyCode) -> Option<cymbal_core::transform::Transform
 type ParsedArgs<'a> = (
     Option<String>,
     Option<(&'a str, &'a str, Option<&'a str>, bool)>,
+    Option<(&'a str, &'a str)>,
     Option<&'a str>,
 );
 
 fn parse_args(args: &[String]) -> ParsedArgs<'_> {
-    // returns (midi_port, render args (input, output, seconds), tui file)
+    // returns (midi_port, render args (input, output, seconds), tracks args (input, outdir), tui file)
     let mut it = args.iter().map(String::as_str);
     let first = it.next();
     match first {
@@ -314,39 +327,44 @@ fn parse_args(args: &[String]) -> ParsedArgs<'_> {
                 Some(&p) => (Some(p.to_string()), rest[1..].to_vec()),
             };
             match rest.as_slice() {
-                ["render", input, output] => (port, Some((input, output, None, false)), None),
+                ["render", input, output] => (port, Some((input, output, None, false)), None, None),
+                ["render", "--tracks", input, outdir] => (port, None, Some((input, outdir)), None),
                 ["render", "--f32", input, output] => {
-                    (port, Some((input, output, None, true)), None)
+                    (port, Some((input, output, None, true)), None, None)
                 }
                 ["render", "--f32", input, output, seconds] => {
-                    (port, Some((input, output, Some(seconds), true)), None)
+                    (port, Some((input, output, Some(seconds), true)), None, None)
                 }
-                [file] => (port, None, Some(file)),
-                _ => (port, None, None),
+                [file] => (port, None, None, Some(file)),
+                _ => (port, None, None, None),
             }
         }
         Some("render") => {
             let rest: Vec<&str> = it.collect();
             match rest.as_slice() {
-                [input, output] => (None, Some((input, output, None, false)), None),
-                ["--f32", input, output] => (None, Some((input, output, None, true)), None),
+                [input, output] => (None, Some((input, output, None, false)), None, None),
+                ["--tracks", input, outdir] => (None, None, Some((input, outdir)), None),
+                ["--f32", input, output] => (None, Some((input, output, None, true)), None, None),
                 ["--f32", input, output, seconds] => {
-                    (None, Some((input, output, Some(seconds), true)), None)
+                    (None, Some((input, output, Some(seconds), true)), None, None)
                 }
-                [input, output, seconds] => {
-                    (None, Some((input, output, Some(seconds), false)), None)
-                }
-                _ => (None, None, None),
+                [input, output, seconds] => (
+                    None,
+                    Some((input, output, Some(seconds), false)),
+                    None,
+                    None,
+                ),
+                _ => (None, None, None, None),
             }
         }
-        Some(file) => (None, None, Some(file)),
-        None => (None, None, None),
+        Some(file) => (None, None, None, Some(file)),
+        None => (None, None, None, None),
     }
 }
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (midi_port, render, tui_file) = parse_args(&args);
+    let (midi_port, render, tracks, tui_file) = parse_args(&args);
     if let Some((input, output, seconds, f32)) = render {
         let seconds = match seconds {
             None => RENDER_DEFAULT_SECONDS,
@@ -379,6 +397,19 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
+    if let Some((input, outdir)) = tracks {
+        return match render_tracks_to_dir(
+            std::path::Path::new(input),
+            std::path::Path::new(outdir),
+            RENDER_DEFAULT_SECONDS,
+        ) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if let Some(file) = tui_file {
         return match run_tui(std::path::Path::new(file), midi_port) {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -389,7 +420,7 @@ fn main() -> std::process::ExitCode {
         };
     }
     eprintln!(
-        "usage: cymbal [--midi [port]] <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]"
+        "usage: cymbal [--midi [port]] <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]\n       cymbal render --tracks <in.cym> <outdir>"
     );
     std::process::ExitCode::from(2)
 }
@@ -529,7 +560,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     let rec = rec.clone();
                                     let path = free_path(
                                         &dir,
-                                        &format!("recording-{ts}-{}", sanitize_name(name)),
+                                        &format!(
+                                            "recording-{ts}-{}",
+                                            cymbal_core::wav::sanitize_name(name)
+                                        ),
                                     );
                                     let tx = msg_tx.clone();
                                     let start = Instant::now();
@@ -799,6 +833,28 @@ mod tests {
     }
 
     #[test]
+    fn render_tracks_writes_master_and_loop_files() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("cymbal_tracks_src_{}.cym", std::process::id()));
+        let out_dir = dir.join(format!("cymbal_tracks_out_{}", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&src_path).unwrap();
+            write!(
+                f,
+                "let kick = kick()\nlet hat = hat()\nloop \"b\":\n    kick << \"x\"\nloop \"h\":\n    hat << \"x\"\n"
+            )
+            .unwrap();
+        }
+        render_tracks_to_dir(&src_path, &out_dir, 1).unwrap();
+        assert!(out_dir.join("master.wav").exists());
+        assert!(out_dir.join("b.wav").exists());
+        assert!(out_dir.join("h.wav").exists());
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
     fn render_src_loads_samples_from_base_dir() {
         let dir = std::env::temp_dir();
         let sample_path = dir.join(format!("cymbal_rs_smp_{}.wav", std::process::id()));
@@ -1034,9 +1090,9 @@ mod tests {
 
     #[test]
     fn sanitize_name_replaces_unsafe_chars() {
-        assert_eq!(sanitize_name("beat 1"), "beat-1");
-        assert_eq!(sanitize_name("a/b\\c:d"), "a-b-c-d");
-        assert_eq!(sanitize_name("plain"), "plain");
+        assert_eq!(cymbal_core::wav::sanitize_name("beat 1"), "beat-1");
+        assert_eq!(cymbal_core::wav::sanitize_name("a/b\\c:d"), "a-b-c-d");
+        assert_eq!(cymbal_core::wav::sanitize_name("plain"), "plain");
     }
 
     #[test]
@@ -1044,7 +1100,12 @@ mod tests {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!("cymbal_collide_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let stem = |name: &str| format!("recording-20260804-153245-{}", sanitize_name(name));
+        let stem = |name: &str| {
+            format!(
+                "recording-20260804-153245-{}",
+                cymbal_core::wav::sanitize_name(name)
+            )
+        };
         let p1 = free_path(&dir, &stem("beat 1"));
         std::fs::File::create(&p1).unwrap().write_all(b"x").unwrap();
         let p2 = free_path(&dir, &stem("beat-1"));
@@ -1055,18 +1116,20 @@ mod tests {
     #[test]
     fn parse_args_single_file() {
         let args = vec!["a.cym".to_string()];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, None);
+        assert_eq!(tracks, None);
         assert_eq!(file, Some("a.cym"));
     }
 
     #[test]
     fn parse_args_midi_file_uses_first_port() {
         let args = vec!["--midi".to_string(), "a.cym".to_string()];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, Some(String::new()));
         assert_eq!(render, None);
+        assert_eq!(tracks, None);
         assert_eq!(file, Some("a.cym"));
     }
 
@@ -1077,9 +1140,10 @@ mod tests {
             "UM-1".to_string(),
             "a.cym".to_string(),
         ];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, Some("UM-1".to_string()));
         assert_eq!(render, None);
+        assert_eq!(tracks, None);
         assert_eq!(file, Some("a.cym"));
     }
 
@@ -1091,9 +1155,10 @@ mod tests {
             "in.cym".to_string(),
             "out.wav".to_string(),
         ];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, Some(String::new()));
         assert_eq!(render, Some(("in.cym", "out.wav", None, false)));
+        assert_eq!(tracks, None);
         assert_eq!(file, None);
     }
 
@@ -1104,9 +1169,10 @@ mod tests {
             "in.cym".to_string(),
             "out.wav".to_string(),
         ];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", None, false)));
+        assert_eq!(tracks, None);
         assert_eq!(file, None);
     }
 
@@ -1118,9 +1184,10 @@ mod tests {
             "in.cym".to_string(),
             "out.wav".to_string(),
         ];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", None, true)));
+        assert_eq!(tracks, None);
         assert_eq!(file, None);
     }
 
@@ -1133,9 +1200,10 @@ mod tests {
             "out.wav".to_string(),
             "5".to_string(),
         ];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", Some("5"), true)));
+        assert_eq!(tracks, None);
         assert_eq!(file, None);
     }
 
@@ -1147,18 +1215,35 @@ mod tests {
             "out.wav".to_string(),
             "5".to_string(),
         ];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", Some("5"), false)));
+        assert_eq!(tracks, None);
+        assert_eq!(file, None);
+    }
+
+    #[test]
+    fn parse_args_render_tracks() {
+        let args = vec![
+            "render".to_string(),
+            "--tracks".to_string(),
+            "in.cym".to_string(),
+            "outdir".to_string(),
+        ];
+        let (midi, render, tracks, file) = parse_args(&args);
+        assert_eq!(midi, None);
+        assert_eq!(render, None);
+        assert_eq!(tracks, Some(("in.cym", "outdir")));
         assert_eq!(file, None);
     }
 
     #[test]
     fn parse_args_garbage_is_all_none() {
         let args = vec!["render".to_string(), "in.cym".to_string()];
-        let (midi, render, file) = parse_args(&args);
+        let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, None);
+        assert_eq!(tracks, None);
         assert_eq!(file, None);
     }
 }
