@@ -37,7 +37,11 @@ const RENDER_DEFAULT_SECONDS: u64 = 120;
 enum UiMsg {
     Err(Error),
     Info(String),
-    Reloaded(HashMap<String, u64>),
+    Reloaded {
+        generations: HashMap<String, u64>,
+        loops: Vec<String>,
+        seq: u64,
+    },
 }
 
 fn next_loop_generations(
@@ -61,12 +65,35 @@ fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
             status.clear_error();
             status.message = s;
         }
-        UiMsg::Reloaded(lg) => {
-            status.loops = lg.keys().cloned().collect();
-            status.clear_error();
-            status.message = "reloaded".into();
-        }
+        UiMsg::Reloaded { .. } => {}
     }
+}
+
+fn handle_reloaded(
+    status: &mut Status,
+    latest: &mut HashMap<String, u64>,
+    latest_seq: &mut u64,
+    generations: HashMap<String, u64>,
+    loops: Vec<String>,
+    seq: u64,
+) {
+    if seq <= *latest_seq {
+        return;
+    }
+    *latest_seq = seq;
+    let changed: Vec<String> = loops
+        .iter()
+        .filter(|n| latest.get(*n) != generations.get(*n))
+        .cloned()
+        .collect();
+    *latest = generations;
+    status.loops = loops;
+    status.clear_error();
+    status.message = if changed.is_empty() {
+        "reloaded: nothing changed".into()
+    } else {
+        format!("reloaded: {}", changed.join(", "))
+    };
 }
 
 fn loop_names(src: &str) -> Result<Vec<String>, Error> {
@@ -253,6 +280,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
     let mut record_start: Option<Instant> = None;
     let mut record_writer: Option<std::thread::JoinHandle<()>> = None;
     let mut reload_seq: u64 = 1;
+    let mut latest_seq: u64 = 0;
 
     let result = (|| -> io::Result<()> {
         loop {
@@ -274,7 +302,11 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                     let gens = next_loop_generations(&latest, &names);
                                     match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                                         Ok(tl) => {
-                                            let _ = tx.send(UiMsg::Reloaded(gens));
+                                            let _ = tx.send(UiMsg::Reloaded {
+                                                generations: gens,
+                                                loops: names,
+                                                seq,
+                                            });
                                             let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                                         }
                                         Err(e) => {
@@ -381,7 +413,12 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             std::thread::spawn(move || {
                                 match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                                     Ok(tl) => {
-                                        let _ = tx.send(UiMsg::Reloaded(gens));
+                                        let names = loop_names(&src).unwrap_or_default();
+                                        let _ = tx.send(UiMsg::Reloaded {
+                                            generations: gens,
+                                            loops: names,
+                                            seq,
+                                        });
                                         let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                                     }
                                     Err(e) => {
@@ -405,7 +442,12 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             std::thread::spawn(move || {
                                 match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                                     Ok(tl) => {
-                                        let _ = tx.send(UiMsg::Reloaded(gens));
+                                        let names = loop_names(&src).unwrap_or_default();
+                                        let _ = tx.send(UiMsg::Reloaded {
+                                            generations: gens,
+                                            loops: names,
+                                            seq,
+                                        });
                                         let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                                     }
                                     Err(e) => {
@@ -432,10 +474,21 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                 }
             }
             if let Ok(msg) = msg_rx.try_recv() {
-                if let UiMsg::Reloaded(lg) = &msg {
-                    latest_loops = lg.clone();
+                match msg {
+                    UiMsg::Reloaded {
+                        generations,
+                        loops,
+                        seq,
+                    } => handle_reloaded(
+                        &mut status,
+                        &mut latest_loops,
+                        &mut latest_seq,
+                        generations,
+                        loops,
+                        seq,
+                    ),
+                    m => apply_ui_msg(&mut status, m),
                 }
-                apply_ui_msg(&mut status, msg);
             }
             if recording && let Some(start) = record_start {
                 status.record_elapsed_secs = start.elapsed().as_secs();
@@ -597,12 +650,91 @@ mod tests {
     }
 
     #[test]
-    fn apply_ui_msg_reloaded_updates_loops() {
+    fn handle_reloaded_sets_ordered_loops_and_noop_message() {
         let mut status = Status::new();
-        let mut lg = HashMap::new();
-        lg.insert("b".to_string(), 1u64);
-        apply_ui_msg(&mut status, UiMsg::Reloaded(lg));
+        let mut latest = HashMap::new();
+        let mut latest_seq = 0;
+        let mut gens = HashMap::new();
+        gens.insert("b".to_string(), 1u64);
+        latest.insert("b".to_string(), 1u64);
+        handle_reloaded(
+            &mut status,
+            &mut latest,
+            &mut latest_seq,
+            gens.clone(),
+            vec!["b".to_string()],
+            1,
+        );
         assert_eq!(status.loops, vec!["b".to_string()]);
+        assert_eq!(status.message, "reloaded: nothing changed");
+        assert_eq!(latest, gens);
+        assert_eq!(latest_seq, 1);
+    }
+
+    #[test]
+    fn handle_reloaded_reports_changed_loops() {
+        let mut status = Status::new();
+        let mut latest = HashMap::new();
+        latest.insert("a".to_string(), 1u64);
+        latest.insert("b".to_string(), 1u64);
+        let mut latest_seq = 0;
+        let mut gens = HashMap::new();
+        gens.insert("a".to_string(), 1u64);
+        gens.insert("b".to_string(), 2u64);
+        handle_reloaded(
+            &mut status,
+            &mut latest,
+            &mut latest_seq,
+            gens,
+            vec!["a".to_string(), "b".to_string()],
+            1,
+        );
+        assert_eq!(status.message, "reloaded: b");
+    }
+
+    #[test]
+    fn handle_reloaded_includes_new_loops() {
+        let mut status = Status::new();
+        let mut latest = HashMap::new();
+        latest.insert("b".to_string(), 2u64);
+        let mut latest_seq = 0;
+        let mut gens = HashMap::new();
+        gens.insert("b".to_string(), 2u64);
+        gens.insert("k".to_string(), 3u64);
+        handle_reloaded(
+            &mut status,
+            &mut latest,
+            &mut latest_seq,
+            gens,
+            vec!["b".to_string(), "k".to_string()],
+            1,
+        );
+        assert_eq!(status.message, "reloaded: k");
+        assert_eq!(status.loops, vec!["b".to_string(), "k".to_string()]);
+    }
+
+    #[test]
+    fn handle_reloaded_ignores_stale_seq() {
+        let mut status = Status::new();
+        status.loops = vec!["a".to_string()];
+        status.message = "reloaded: a".into();
+        let mut latest = HashMap::new();
+        latest.insert("a".to_string(), 5u64);
+        let mut latest_seq = 3;
+        let mut gens = HashMap::new();
+        gens.insert("z".to_string(), 9u64);
+        handle_reloaded(
+            &mut status,
+            &mut latest,
+            &mut latest_seq,
+            gens,
+            vec!["z".to_string()],
+            3,
+        );
+        assert_eq!(status.loops, vec!["a".to_string()]);
+        assert_eq!(status.message, "reloaded: a");
+        assert_eq!(latest.get("z"), None);
+        assert_eq!(latest_seq, 3);
     }
 
     #[test]
