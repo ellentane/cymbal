@@ -139,6 +139,13 @@ pub fn schedule(
             };
             let default_pitch = voice_default_pitch(voice).unwrap_or(60);
             let (steps, step_list) = bar_triggers(&bind.pattern, default_pitch)?;
+            if bars * steps as u64 > 1_000_000 {
+                return Err(Error::new(
+                    bind.span,
+                    ErrorKind::Eval,
+                    "pattern too dense for the render window",
+                ));
+            }
             let step_samples = (bar / steps as u64).max(1);
 
             for bar_idx in 0..bars {
@@ -386,6 +393,25 @@ mod tests {
         .unwrap();
         let err = schedule(&program, &HashMap::new(), &HashMap::new(), 96000, 48000).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Eval);
+    }
+
+    #[test]
+    fn dense_pattern_at_high_tempo_is_capped() {
+        let err = src2timeline_v11(
+            "tempo 4000\nlet kick = kick()\nloop \"b\":\n    kick << \"x x x x x x x x x x x x x x x x x\"\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            48000 * 3600,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Eval);
+        assert!(err.message.contains("dense"), "{}", err.message);
+        let tl = src2timeline(
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\"\n",
+            0,
+            96000,
+        );
+        assert!(!tl.events.is_empty(), "normal patterns still schedule");
     }
 
     #[test]

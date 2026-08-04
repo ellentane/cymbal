@@ -402,6 +402,13 @@ impl<'a> Parser<'a> {
                         ));
                     };
                     self.advance();
+                    if path.starts_with('/') || path.split('/').any(|c| c == "..") {
+                        return Err(Error::new(
+                            span,
+                            ErrorKind::Parse,
+                            "sample path must be relative and must not contain '..'",
+                        ));
+                    }
                     return Ok(Expr::Sample(path, span));
                 }
                 if self.peek_kind() == &TokenKind::LParen {
@@ -718,6 +725,31 @@ loop "beat" tempo=90:
     fn sample_missing_path_is_parse_error() {
         let err = parse(&lex("loop \"a\":\n    sample << \"x\"\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn sample_paths_cannot_escape_base_dir() {
+        for bad in ["/etc/hostname", "../x.wav", "a/../b.wav"] {
+            let src = format!("loop \"a\":\n    sample \"{bad}\" << \"x\"\n");
+            let err = parse(&lex(&src).unwrap()).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Parse, "path '{bad}' must be rejected");
+            assert!(
+                err.message.contains(".."),
+                "path '{bad}' error must explain: {}",
+                err.message
+            );
+        }
+        for good in ["kick", "sub/kick.wav"] {
+            let src = format!("loop \"a\":\n    sample \"{good}\" << \"x\"\n");
+            let program = parse(&lex(&src).unwrap()).unwrap();
+            let Stmt::Loop(l) = &program.statements[0] else {
+                panic!()
+            };
+            assert_eq!(
+                l.binds[0].voice,
+                Expr::Sample(good.into(), Span { line: 2, col: 5 })
+            );
+        }
     }
 
     #[test]
