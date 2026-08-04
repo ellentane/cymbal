@@ -46,12 +46,8 @@ pub fn buffer_latency_ms(config: &cpal::StreamConfig) -> Option<f32> {
 fn expand_to_device(scratch: &[f32], data: &mut [f32], channels: usize) {
     let frames = data.len() / channels;
     for (i, frame) in scratch.chunks(2).take(frames).enumerate() {
-        let l = frame[0];
-        let r = frame[1];
-        data[i * channels] = l;
-        data[i * channels + 1] = r;
-        for ch in 2..channels {
-            data[i * channels + ch] = if ch % 2 == 0 { l } else { r };
+        for ch in 0..channels {
+            data[i * channels + ch] = if ch % 2 == 0 { frame[0] } else { frame[1] };
         }
     }
 }
@@ -160,5 +156,32 @@ mod tests {
         let mut data = [0.0f32; 2];
         expand_to_device(&scratch, &mut data, 2);
         assert_eq!(data, [0.1, 0.2]);
+    }
+
+    #[test]
+    fn stereo_fits_mono_device() {
+        let scratch = [0.1, 0.9, 0.2, 0.8];
+        let mut data = [0.0f32; 2];
+        expand_to_device(&scratch, &mut data, 1);
+        assert_eq!(data, [0.1, 0.2]);
+    }
+
+    #[test]
+    fn repeats_stereo_across_device_channels() {
+        for channels in 1..=6 {
+            let scratch = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+            let mut data = vec![0.0f32; 3 * channels];
+            expand_to_device(&scratch, &mut data, channels);
+            for frame in 0..3 {
+                for ch in 0..channels {
+                    let expected = if ch % 2 == 0 {
+                        scratch[frame * 2]
+                    } else {
+                        scratch[frame * 2 + 1]
+                    };
+                    assert_eq!(data[frame * channels + ch], expected);
+                }
+            }
+        }
     }
 }
