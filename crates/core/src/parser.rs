@@ -208,35 +208,6 @@ impl<'a> Parser<'a> {
         let mut comp = None;
         let mut swing = None;
         while let TokenKind::Ident(name) = self.peek_kind().clone() {
-            if name.as_str() == "swing" {
-                let pspan = self.span();
-                self.advance();
-                if self.peek_kind() != &TokenKind::Assign {
-                    return Err(Error::new(
-                        self.span(),
-                        ErrorKind::Parse,
-                        "expected '=' after parameter",
-                    ));
-                }
-                self.advance();
-                let TokenKind::Number(n) = self.peek_kind().clone() else {
-                    return Err(Error::new(
-                        self.span(),
-                        ErrorKind::Parse,
-                        "expected number after parameter",
-                    ));
-                };
-                self.advance();
-                if swing.is_some() {
-                    return Err(Error::new(
-                        pspan,
-                        ErrorKind::Parse,
-                        "duplicate parameter 'swing'",
-                    ));
-                }
-                swing = Some(n as f32);
-                continue;
-            }
             let slot = match name.as_str() {
                 "pan" => &mut pan,
                 "vel" => &mut vel,
@@ -245,6 +216,7 @@ impl<'a> Parser<'a> {
                 "bass" => &mut bass,
                 "treble" => &mut treble,
                 "comp" => &mut comp,
+                "swing" => &mut swing,
                 _ => break,
             };
             let pspan = self.span();
@@ -274,9 +246,7 @@ impl<'a> Parser<'a> {
                 "parameters must come after combinators",
             ));
         }
-        if let Some(swing) = swing
-            && !(0.0..=0.5).contains(&swing)
-        {
+        if !param_range(swing, 0.0, 0.5) {
             return Err(Error::new(
                 span,
                 ErrorKind::Parse,
@@ -302,7 +272,12 @@ impl<'a> Parser<'a> {
                 ));
             }
         }
-        for (name, v) in [("bass", bass), ("treble", treble), ("comp", comp)] {
+        for (name, v) in [
+            ("bass", bass),
+            ("treble", treble),
+            ("comp", comp),
+            ("swing", swing),
+        ] {
             if matches!(v, Some(Param::Ramp(..))) {
                 return Err(Error::new(
                     span,
@@ -797,7 +772,7 @@ loop "beat" tempo=90:
         assert_eq!(l.binds[0].bass, Some(Param::Const(0.5)));
         assert_eq!(l.binds[0].treble, Some(Param::Const(1.0)));
         assert_eq!(l.binds[0].comp, Some(Param::Const(0.25)));
-        assert_eq!(l.binds[0].swing, Some(0.3));
+        assert_eq!(l.binds[0].swing, Some(Param::Const(0.3)));
     }
 
     #[test]
@@ -842,5 +817,12 @@ loop "beat" tempo=90:
                 .kind,
             ErrorKind::Parse
         );
+    }
+
+    #[test]
+    fn swing_ramp_is_parse_error() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" swing=0:1\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.message.contains("swing"));
     }
 }

@@ -145,10 +145,8 @@ pub fn schedule(
                 for (step_idx, step) in steps_vec.into_iter().enumerate() {
                     let Some(step) = step else { continue };
                     let mut offset = bar_idx * bar + step_idx as u64 * step_samples;
-                    if let Some(swing) = bind.swing
-                        && steps.is_multiple_of(2)
-                        && step_idx % 2 == 1
-                    {
+                    let swing = tone_value(&bind.swing);
+                    if swing > 0.0 && steps.is_multiple_of(2) && step_idx % 2 == 1 {
                         let shifted = offset as i64 + (swing * step_samples as f32).round() as i64;
                         let bar_start = (bar_idx * bar) as i64;
                         offset = shifted.clamp(bar_start, bar_start + bar as i64 - 1) as u64;
@@ -185,27 +183,9 @@ pub fn schedule(
                         pan: resolve_param(&bind.pan, 0.0, step_idx, steps),
                         delay_send: resolve_param(&bind.delay_send, 0.0, step_idx, steps),
                         reverb_send: resolve_param(&bind.reverb_send, 0.0, step_idx, steps),
-                        bass: bind
-                            .bass
-                            .and_then(|p| match p {
-                                Param::Const(v) => Some(v),
-                                _ => None,
-                            })
-                            .unwrap_or(0.0),
-                        treble: bind
-                            .treble
-                            .and_then(|p| match p {
-                                Param::Const(v) => Some(v),
-                                _ => None,
-                            })
-                            .unwrap_or(0.0),
-                        comp: bind
-                            .comp
-                            .and_then(|p| match p {
-                                Param::Const(v) => Some(v),
-                                _ => None,
-                            })
-                            .unwrap_or(0.0),
+                        bass: tone_value(&bind.bass),
+                        treble: tone_value(&bind.treble),
+                        comp: tone_value(&bind.comp),
                         sample: sample_data.clone(),
                     });
                 }
@@ -237,6 +217,13 @@ pub fn sample_paths(program: &Program) -> Vec<String> {
         }
     }
     out
+}
+
+fn tone_value(p: &Option<Param>) -> f32 {
+    match p {
+        Some(Param::Const(v)) => *v,
+        _ => 0.0,
+    }
 }
 
 fn resolve_param(p: &Option<Param>, default: f32, step_idx: usize, steps: usize) -> f32 {
@@ -757,5 +744,27 @@ mod tests {
         );
         let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
         assert_eq!(offsets, vec![0, 12000]);
+    }
+
+    #[test]
+    fn swing_acts_on_rev_swapped_positions() {
+        // rev maps step i -> 3-i: ". x . x" -> hits at 0,2 (even, unswung).
+        let tl = src2timeline_v11(
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \". x . x\" >> rev swing=0.25\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(offsets, vec![0, 12000]);
+        // "x . x ." -> rev -> hits at 1,3 (odd, swung +1500).
+        let tl = src2timeline_v11(
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" >> rev swing=0.25\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        );
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(offsets, vec![7500, 19500]);
     }
 }

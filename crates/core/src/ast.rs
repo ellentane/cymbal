@@ -49,7 +49,7 @@ pub struct BindStmt {
     pub bass: Option<Param>,
     pub treble: Option<Param>,
     pub comp: Option<Param>,
-    pub swing: Option<f32>,
+    pub swing: Option<Param>,
     pub span: Span,
 }
 
