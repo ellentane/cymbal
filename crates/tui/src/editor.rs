@@ -30,6 +30,13 @@ impl Editor {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn set_content(&mut self, content: String) {
+        self.lines = content.split('\n').map(|s| s.to_string()).collect();
+        self.x = 0;
+        self.y = 0;
+    }
+
     pub fn insert_char(&mut self, c: char) {
         let idx = self.lines[self.y]
             .char_indices()
@@ -146,6 +153,17 @@ mod tests {
         e.move_down();
         e.move_down();
         assert_eq!(e.y, 1);
+    }
+
+    #[test]
+    fn set_content_replaces_text_and_clamps_cursor() {
+        let mut e = Editor::new("ab\ncd".to_string());
+        e.move_down();
+        e.move_right();
+        e.set_content("x\nyz".to_string());
+        assert_eq!(e.content(), "x\nyz");
+        assert_eq!(e.y, 0, "cursor resets to the top");
+        assert_eq!(e.x, 0);
     }
 
     #[test]
