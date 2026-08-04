@@ -748,6 +748,7 @@ mod tests {
         render_to_wav_f32(&src_path, &out_path, 1).unwrap();
         let bytes = std::fs::read(&out_path).unwrap();
         assert_eq!(&bytes[20..22], &3u16.to_le_bytes(), "fmt tag 3");
+        assert_eq!(bytes.len(), 48000 * 2 * 4 + 44, "1s stereo f32 wav length");
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
     }
