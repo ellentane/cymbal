@@ -183,4 +183,36 @@ mod tests {
             "comb feedback must keep the reverb tail audible"
         );
     }
+
+    #[test]
+    fn tone_params_change_output_but_bypass_is_identical() {
+        let src = "let kick = kick()\nloop \"b\":\n    kick << \"x . . x . . x .\"\n";
+        let plain = render(src, 384000);
+        let shaped = render(
+            "let kick = kick()\nloop \"b\":\n    kick << \"x . . x . . x .\" bass=1.0 treble=0.5 comp=0.3\n",
+            384000,
+        );
+        assert_ne!(plain, shaped, "shaping must change the audio");
+        let with_zero = render(
+            "let kick = kick()\nloop \"b\":\n    kick << \"x . . x . . x .\" bass=0 treble=0 comp=0\n",
+            384000,
+        );
+        assert_eq!(plain, with_zero, "zeroed params must be bit-identical");
+    }
+
+    #[test]
+    fn automation_ramp_pans_across_bar() {
+        // 8 steps over one 48000-sample bar: step 6000; lead duration 9600.
+        // At frame 2000 the active voices are step 0 (pan -1) -> L. At frame
+        // 34000 the active voice is step 5 (pan -1 + 2*5/7 = 0.43) -> R.
+        let src =
+            "tempo 240\nlet lead = lead()\nloop \"b\":\n    lead << \"x x x x x x x x\" pan=-1:1\n";
+        let out = render(src, 48000);
+        let l = out[2000 * 2];
+        let r = out[2000 * 2 + 1];
+        assert!(l > r, "early steps favor the left: {l} vs {r}");
+        let l2 = out[34000 * 2];
+        let r2 = out[34000 * 2 + 1];
+        assert!(r2 > l2, "late steps favor the right: {l2} vs {r2}");
+    }
 }
