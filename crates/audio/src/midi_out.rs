@@ -95,7 +95,7 @@ fn writer_loop(tx: Arc<MidiOut>, mut conn: midir::MidiOutputConnection) {
                 MidiItem::Rebase { offset, tempo } => {
                     origin_offset = Some(offset);
                     origin_time = Some(Instant::now());
-                    pulse_period = Duration::from_secs_f64(60.0 / (tempo * 24.0));
+                    pulse_period = Duration::from_secs_f64(60.0 / (tempo.max(1.0) * 24.0));
                     next_pulse = Some(Instant::now() + pulse_period);
                 }
                 MidiItem::Note { offset, bytes } => {

@@ -78,7 +78,7 @@ pub fn schedule(
         .iter()
         .find_map(|s| {
             if let Stmt::Tempo(t, _) = s {
-                Some(*t)
+                Some(Transport::new(*t, sample_rate).tempo)
             } else {
                 None
             }
@@ -615,6 +615,21 @@ mod tests {
             96000,
         );
         assert_eq!(tl.loops, vec!["b".to_string(), "h".to_string()]);
+    }
+
+    #[test]
+    fn zero_and_negative_tempo_clamped_in_timeline() {
+        for src in [
+            "tempo 0\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n",
+            "tempo -5\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n",
+        ] {
+            let tl = src2timeline(src, 0, 96000);
+            assert!(
+                tl.tempo >= 1.0,
+                "timeline tempo must be clamped to the transport range, got {}",
+                tl.tempo
+            );
+        }
     }
 
     #[test]
