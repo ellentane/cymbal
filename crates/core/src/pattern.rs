@@ -118,7 +118,10 @@ pub fn bar_triggers(
 ) -> Result<(usize, Vec<Option<Step>>)> {
     match pattern {
         Expr::PatternString(s, span) => {
-            let hits = expand_string(s)?;
+            let hits = expand_string(s).map_err(|mut e| {
+                e.span = *span;
+                e
+            })?;
             if !sample_voice && hits.iter().any(|h| h.semitone != 0) {
                 return Err(Error::new(
                     *span,
@@ -171,7 +174,10 @@ pub fn bar_triggers(
                     "tuple note array cannot be empty",
                 ));
             }
-            let hits = expand_string(s)?;
+            let hits = expand_string(s).map_err(|mut e| {
+                e.span = *span;
+                e
+            })?;
             if !sample_voice && hits.iter().any(|h| h.semitone != 0) {
                 return Err(Error::new(
                     *span,
@@ -533,5 +539,14 @@ mod tests {
                 semitone: 2
             })]
         );
+    }
+
+    #[test]
+    fn modifier_errors_carry_pattern_span() {
+        let span = Span { line: 7, col: 3 };
+        let err = bar_triggers(&Expr::PatternString("x!1.5".into(), span), 60, false).unwrap_err();
+        assert_eq!(err.span, span);
+        let err = bar_triggers(&Expr::Tuple(vec![], "x!1.5".into(), span), 60, false).unwrap_err();
+        assert_eq!(err.span, span);
     }
 }
