@@ -176,6 +176,18 @@ fn recording_path(dir: &std::path::Path, ts: &str) -> std::path::PathBuf {
     }
 }
 
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn record_loop(
     rec: &Arc<cymbal_audio::recorder::Recorder>,
     path: &std::path::Path,
@@ -339,7 +351,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
 
     let mut recording = false;
     let mut record_start: Option<Instant> = None;
-    let mut record_writer: Option<std::thread::JoinHandle<()>> = None;
+    let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut reload_seq: u64 = 1;
     let mut latest_seq: u64 = 0;
 
@@ -365,8 +377,8 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 recording = false;
                                 status.recording = false;
                                 let _ = queue.send(Msg::RecordStop);
-                                if let Some(w) = record_writer.take() {
-                                    let deadline = Instant::now() + Duration::from_secs(2);
+                                let deadline = Instant::now() + Duration::from_secs(2);
+                                for w in record_writers.drain(..) {
                                     while !w.is_finished() && Instant::now() < deadline {
                                         std::thread::sleep(Duration::from_millis(10));
                                     }
@@ -378,12 +390,6 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             if !recording {
                                 recording = true;
                                 record_start = Some(Instant::now());
-                                let rec = cymbal_audio::recorder::Recorder::new(32, 4096);
-                                let rec_for_queue = rec.clone();
-                                let _ = queue.send(Msg::RecordStart {
-                                    master: rec_for_queue,
-                                    tracks: vec![],
-                                });
                                 let ts = cymbal_core::timefmt::format_timestamp(
                                     std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -392,12 +398,44 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 );
                                 let dir =
                                     file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-                                let path = recording_path(&dir, &ts);
+                                let master_path = recording_path(&dir, &ts);
+                                let master = cymbal_audio::recorder::Recorder::new(32, 4096);
+                                let mut tracks = Vec::new();
+                                for name in &status.loops {
+                                    tracks.push((
+                                        name.clone(),
+                                        cymbal_audio::recorder::Recorder::new(32, 4096),
+                                    ));
+                                }
+                                let master_for_queue = master.clone();
+                                let _ = queue.send(Msg::RecordStart {
+                                    master: master_for_queue,
+                                    tracks: tracks
+                                        .iter()
+                                        .map(|(n, r)| (n.clone(), r.clone()))
+                                        .collect(),
+                                });
                                 let tx = msg_tx.clone();
                                 let start = Instant::now();
-                                record_writer = Some(std::thread::spawn(move || {
-                                    record_loop(&rec, &path, &tx, start)
+                                let mut writers = Vec::new();
+                                let m2 = master.clone();
+                                let p2 = master_path.clone();
+                                writers.push(std::thread::spawn(move || {
+                                    record_loop(&m2, &p2, &tx, start)
                                 }));
+                                for (name, rec) in &tracks {
+                                    let rec = rec.clone();
+                                    let path = dir.join(format!(
+                                        "recording-{ts}-{}.wav",
+                                        sanitize_name(name)
+                                    ));
+                                    let tx = msg_tx.clone();
+                                    let start = Instant::now();
+                                    writers.push(std::thread::spawn(move || {
+                                        record_loop(&rec, &path, &tx, start)
+                                    }));
+                                }
+                                record_writers = writers;
                                 status.recording = true;
                                 status.clear_error();
                                 status.message = "recording...".into();
@@ -528,7 +566,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                     UiMsg::RecordError(s) => {
                         recording = false;
                         record_start = None;
-                        record_writer = None;
+                        record_writers = Vec::new();
                         status.recording = false;
                         status.set_error(s);
                     }
@@ -871,5 +909,12 @@ mod tests {
             "recording-20260804-153245-3.wav"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sanitize_name_replaces_unsafe_chars() {
+        assert_eq!(sanitize_name("beat 1"), "beat-1");
+        assert_eq!(sanitize_name("a/b\\c:d"), "a-b-c-d");
+        assert_eq!(sanitize_name("plain"), "plain");
     }
 }
