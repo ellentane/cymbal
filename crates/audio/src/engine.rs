@@ -36,9 +36,8 @@ pub struct Engine {
     position: u64,
     next_bar_abs: u64,
     timeline_origin: u64,
-    generation: u64,
-    timeline: Option<Arc<Timeline>>,
-    pending: Option<Arc<Timeline>>,
+    last_swap_seq: u64,
+    pending: Option<(Arc<Timeline>, u64)>,
     future: Vec<Scheduled>,
     active: Vec<Active>,
     master: Master,
@@ -55,8 +54,7 @@ impl Engine {
             position: 0,
             next_bar_abs: 0,
             timeline_origin: 0,
-            generation: 0,
-            timeline: None,
+            last_swap_seq: 0,
             pending: None,
             future: Vec::with_capacity(256),
             active: Vec::with_capacity(32),
@@ -65,8 +63,8 @@ impl Engine {
         }
     }
 
-    pub fn submit_swap(&mut self, timeline: Arc<Timeline>) {
-        self.pending = Some(timeline);
+    pub fn submit_swap(&mut self, timeline: Arc<Timeline>, seq: u64) {
+        self.pending = Some((timeline, seq));
     }
 
     pub fn process(&mut self, out: &mut [f32]) {
@@ -160,10 +158,12 @@ impl Engine {
     }
 
     fn apply_swap_at_boundary(&mut self, now: u64) {
-        if let Some(tl) = self.pending.take() {
-            self.generation = tl.generation;
+        if let Some((tl, seq)) = self.pending.take() {
+            if seq <= self.last_swap_seq {
+                return;
+            }
+            self.last_swap_seq = seq;
             self.timeline_origin = now;
-            self.timeline = Some(tl.clone());
             self.bar_samples = tl.bar_samples;
             self.master.set_bar_samples(tl.bar_samples);
             let kept: HashMap<&str, u64> = tl
@@ -238,15 +238,18 @@ mod tests {
     #[test]
     fn renders_events_into_stereo_buffer() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![
-                ev(0, VoiceKind::Hat, 0, 2400),
-                ev(48000, VoiceKind::Hat, 0, 2400),
-            ],
-            0,
-            vec![("b".into(), 0)],
-            96000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![
+                    ev(0, VoiceKind::Hat, 0, 2400),
+                    ev(48000, VoiceKind::Hat, 0, 2400),
+                ],
+                0,
+                vec![("b".into(), 0)],
+                96000,
+            ),
+            1,
+        );
         let out = engine_step(&mut engine, 96000);
         assert!(
             out[0..16].iter().any(|s| *s != 0.0),
@@ -265,22 +268,28 @@ mod tests {
     #[test]
     fn swap_applies_at_bar_boundary() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![
-                ev(0, VoiceKind::Kick, 0, 14400),
-                ev(60000, VoiceKind::Kick, 0, 14400),
-            ],
-            0,
-            vec![("b".into(), 0)],
-            96000,
-        ));
-        engine_step(&mut engine, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Snare, 1, 2400)],
+        engine.submit_swap(
+            tl(
+                vec![
+                    ev(0, VoiceKind::Kick, 0, 14400),
+                    ev(60000, VoiceKind::Kick, 0, 14400),
+                ],
+                0,
+                vec![("b".into(), 0)],
+                96000,
+            ),
             1,
-            vec![("b".into(), 1)],
-            96000,
-        ));
+        );
+        engine_step(&mut engine, 48000);
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Snare, 1, 2400)],
+                1,
+                vec![("b".into(), 1)],
+                96000,
+            ),
+            2,
+        );
         let out = engine_step(&mut engine, 96000);
         assert!(
             out[12000 * 2..12000 * 2 + 16].iter().any(|s| *s != 0.0),
@@ -298,36 +307,42 @@ mod tests {
     fn unchanged_loop_notes_survive_swap() {
         let mut engine = Engine::new(120.0, 48000);
         // bass loop "b" gen 0, long note from frame 0
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Bass, 0, 50000)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Bass, 0, 50000)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
         engine_step(&mut engine, 24000);
         // swap at bar 24000: "b" unchanged (gen 0), new "h" gen 1
-        engine.submit_swap(tl(
-            vec![
-                ev(0, VoiceKind::Bass, 0, 50000),
-                Event {
-                    sample_offset: 0,
-                    loop_name: "h".into(),
-                    voice: VoiceKind::Hat,
-                    pitch: None,
-                    semitone: 0,
-                    velocity: 1.0,
-                    duration: 2400,
-                    generation: 1,
-                    pan: 0.0,
-                    delay_send: 0.0,
-                    reverb_send: 0.0,
-                    sample: None,
-                },
-            ],
-            1,
-            vec![("b".into(), 0), ("h".into(), 1)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![
+                    ev(0, VoiceKind::Bass, 0, 50000),
+                    Event {
+                        sample_offset: 0,
+                        loop_name: "h".into(),
+                        voice: VoiceKind::Hat,
+                        pitch: None,
+                        semitone: 0,
+                        velocity: 1.0,
+                        duration: 2400,
+                        generation: 1,
+                        pan: 0.0,
+                        delay_send: 0.0,
+                        reverb_send: 0.0,
+                        sample: None,
+                    },
+                ],
+                1,
+                vec![("b".into(), 0), ("h".into(), 1)],
+                24000,
+            ),
+            2,
+        );
         let out = engine_step(&mut engine, 24000);
         assert!(
             out[0..16].iter().any(|s| *s != 0.0),
@@ -342,53 +357,62 @@ mod tests {
     #[test]
     fn changed_loop_notes_are_cut_at_swap() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Bass, 0, 50000)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
-        engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(
-            vec![Event {
-                sample_offset: 0,
-                loop_name: "b".into(),
-                voice: VoiceKind::Bass,
-                pitch: None,
-                semitone: 0,
-                velocity: 1.0,
-                duration: 50000,
-                generation: 1,
-                pan: 0.0,
-                delay_send: 0.0,
-                reverb_send: 0.0,
-                sample: None,
-            }],
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Bass, 0, 50000)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
             1,
-            vec![("b".into(), 1)],
-            24000,
-        ));
+        );
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(
+            tl(
+                vec![Event {
+                    sample_offset: 0,
+                    loop_name: "b".into(),
+                    voice: VoiceKind::Bass,
+                    pitch: None,
+                    semitone: 0,
+                    velocity: 1.0,
+                    duration: 50000,
+                    generation: 1,
+                    pan: 0.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                    sample: None,
+                }],
+                1,
+                vec![("b".into(), 1)],
+                24000,
+            ),
+            2,
+        );
         let out = engine_step(&mut engine, 4800);
         let mut reference = Engine::new(120.0, 48000);
-        reference.submit_swap(tl(
-            vec![Event {
-                sample_offset: 0,
-                loop_name: "b".into(),
-                voice: VoiceKind::Bass,
-                pitch: None,
-                semitone: 0,
-                velocity: 1.0,
-                duration: 50000,
-                generation: 1,
-                pan: 0.0,
-                delay_send: 0.0,
-                reverb_send: 0.0,
-                sample: None,
-            }],
-            1,
-            vec![("b".into(), 1)],
-            24000,
-        ));
+        reference.submit_swap(
+            tl(
+                vec![Event {
+                    sample_offset: 0,
+                    loop_name: "b".into(),
+                    voice: VoiceKind::Bass,
+                    pitch: None,
+                    semitone: 0,
+                    velocity: 1.0,
+                    duration: 50000,
+                    generation: 1,
+                    pan: 0.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                    sample: None,
+                }],
+                1,
+                vec![("b".into(), 1)],
+                24000,
+            ),
+            3,
+        );
         let expect = engine_step(&mut reference, 4800);
         assert_eq!(
             out, expect,
@@ -399,14 +423,17 @@ mod tests {
     #[test]
     fn removed_loop_notes_are_cut_at_swap() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Bass, 0, 50000)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Bass, 0, 50000)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
         engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(vec![], 1, vec![], 24000));
+        engine.submit_swap(tl(vec![], 1, vec![], 24000), 2);
         let out = engine_step(&mut engine, 4800);
         assert!(out[0..16].iter().all(|s| *s == 0.0));
     }
@@ -414,26 +441,35 @@ mod tests {
     #[test]
     fn generation_cutover_drops_stale_events() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Kick, 0, 14400)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 1, 2400)],
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Kick, 0, 14400)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
             1,
-            vec![("b".into(), 1)],
-            24000,
-        ));
+        );
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 1, 2400)],
+                1,
+                vec![("b".into(), 1)],
+                24000,
+            ),
+            2,
+        );
         let out = engine_step(&mut engine, 24000);
         let mut reference = Engine::new(120.0, 48000);
-        reference.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 1, 2400)],
-            1,
-            vec![("b".into(), 1)],
-            24000,
-        ));
+        reference.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 1, 2400)],
+                1,
+                vec![("b".into(), 1)],
+                24000,
+            ),
+            3,
+        );
         let expect = engine_step(&mut reference, 24000);
         assert_eq!(out, expect);
     }
@@ -441,7 +477,7 @@ mod tests {
     #[test]
     fn empty_timeline_is_silent() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![], 96000));
+        engine.submit_swap(tl(vec![], 0, vec![], 96000), 1);
         let mut out = vec![0.5f32; 96000 * 2];
         engine.process(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
@@ -450,17 +486,20 @@ mod tests {
     #[test]
     fn swap_rebases_grid_on_tempo_change() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![], 24000));
+        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1);
         engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(
-            vec![
-                ev(0, VoiceKind::Kick, 1, 2400),
-                ev(12000, VoiceKind::Kick, 1, 2400),
-            ],
-            1,
-            vec![("b".into(), 1)],
-            12000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![
+                    ev(0, VoiceKind::Kick, 1, 2400),
+                    ev(12000, VoiceKind::Kick, 1, 2400),
+                ],
+                1,
+                vec![("b".into(), 1)],
+                12000,
+            ),
+            2,
+        );
         let out = engine_step(&mut engine, 24000);
         assert!(
             out[0..16].iter().any(|s| *s != 0.0),
@@ -480,12 +519,15 @@ mod tests {
     #[test]
     fn recording_taps_post_master_stereo() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 0, 2400)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 0, 2400)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
         let rec = Recorder::new(4, 4);
         engine.start_recording(rec.clone());
         engine_step(&mut engine, 4);
@@ -502,12 +544,15 @@ mod tests {
     #[test]
     fn record_stop_flushes_partial_block() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 0, 2400)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 0, 2400)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
         let rec = Recorder::new(4, 4);
         engine.start_recording(rec.clone());
         engine_step(&mut engine, 3);
@@ -524,12 +569,15 @@ mod tests {
     #[test]
     fn recording_restarts_after_stop() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 0, 2400)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 0, 2400)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
         let rec1 = Recorder::new(4, 4);
         engine.start_recording(rec1.clone());
         engine_step(&mut engine, 3);
@@ -557,24 +605,30 @@ mod tests {
     #[test]
     fn recording_continues_across_swap() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 0, 2400)],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 0, 2400)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
         let rec = Recorder::new(64, 4800);
         engine.start_recording(rec.clone());
         engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(
-            vec![
-                ev(0, VoiceKind::Hat, 0, 2400),
-                ev(19200, VoiceKind::Hat, 0, 2400),
-            ],
-            0,
-            vec![("b".into(), 0)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![
+                    ev(0, VoiceKind::Hat, 0, 2400),
+                    ev(19200, VoiceKind::Hat, 0, 2400),
+                ],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            2,
+        );
         engine_step(&mut engine, 24000);
         engine.stop_recording();
         let blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec.take_filled()).collect();
@@ -602,14 +656,17 @@ mod tests {
     #[test]
     fn large_buffer_spans_multiple_boundaries() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![], 24000));
+        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1);
         engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(
-            vec![ev(0, VoiceKind::Hat, 1, 2400)],
-            1,
-            vec![("b".into(), 1)],
-            24000,
-        ));
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 1, 2400)],
+                1,
+                vec![("b".into(), 1)],
+                24000,
+            ),
+            2,
+        );
         let out = engine_step(&mut engine, 72000);
         assert_eq!(out.len(), 72000 * 2, "three bars of stereo");
         assert!(
@@ -625,5 +682,57 @@ mod tests {
             "third boundary is a no-op"
         );
         assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn stale_swap_is_ignored() {
+        let mut engine = Engine::new(120.0, 48000);
+        let kick_tl = tl(
+            vec![
+                ev(0, VoiceKind::Kick, 0, 14400),
+                ev(24000, VoiceKind::Kick, 0, 14400),
+            ],
+            0,
+            vec![("b".into(), 0)],
+            24000,
+        );
+        engine.submit_swap(kick_tl.clone(), 1);
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Snare, 1, 2400)],
+                1,
+                vec![("b".into(), 1)],
+                24000,
+            ),
+            1,
+        );
+        let out = engine_step(&mut engine, 48000);
+        let mut reference = Engine::new(120.0, 48000);
+        reference.submit_swap(kick_tl, 1);
+        engine_step(&mut reference, 24000);
+        let expect = engine_step(&mut reference, 48000);
+        assert_eq!(
+            out, expect,
+            "stale seq-1 swap must not replace the active timeline"
+        );
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "kick must keep playing across the boundary the stale swap would have taken"
+        );
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 2, 2400)],
+                2,
+                vec![("b".into(), 2)],
+                24000,
+            ),
+            2,
+        );
+        let out = engine_step(&mut engine, 48000);
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "newer seq-2 swap applies at the next boundary"
+        );
     }
 }

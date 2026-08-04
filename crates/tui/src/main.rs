@@ -252,6 +252,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
     let mut recording = false;
     let mut record_start: Option<Instant> = None;
     let mut record_writer: Option<std::thread::JoinHandle<()>> = None;
+    let mut reload_seq: u64 = 1;
 
     let result = (|| -> io::Result<()> {
         loop {
@@ -266,13 +267,15 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             let tx = msg_tx.clone();
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                             let latest = latest_loops.clone();
+                            reload_seq += 1;
+                            let seq = reload_seq;
                             std::thread::spawn(move || match loop_names(&src) {
                                 Ok(names) => {
                                     let gens = next_loop_generations(&latest, &names);
                                     match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                                         Ok(tl) => {
                                             let _ = tx.send(UiMsg::Reloaded(gens));
-                                            let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                                            let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                                         }
                                         Err(e) => {
                                             let _ = tx.send(UiMsg::Err(e));
@@ -373,11 +376,13 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
+                            reload_seq += 1;
+                            let seq = reload_seq;
                             std::thread::spawn(move || {
                                 match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                                     Ok(tl) => {
                                         let _ = tx.send(UiMsg::Reloaded(gens));
-                                        let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                                        let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                                     }
                                     Err(e) => {
                                         let _ = tx.send(UiMsg::Err(e));
@@ -395,11 +400,13 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
+                            reload_seq += 1;
+                            let seq = reload_seq;
                             std::thread::spawn(move || {
                                 match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                                     Ok(tl) => {
                                         let _ = tx.send(UiMsg::Reloaded(gens));
-                                        let _ = queue.send(Msg::Swap(Arc::new(tl)));
+                                        let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                                     }
                                     Err(e) => {
                                         let _ = tx.send(UiMsg::Err(e));

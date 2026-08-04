@@ -6,7 +6,7 @@ use crate::recorder::Recorder;
 
 #[derive(Debug)]
 pub enum Msg {
-    Swap(Arc<Timeline>),
+    Swap(Arc<Timeline>, u64),
     RecordStart(Arc<Recorder>),
     RecordStop,
     Shutdown,
@@ -54,29 +54,29 @@ mod tests {
     #[test]
     fn sends_and_receives_swap_messages() {
         let q = AudioQueue::new(4);
-        q.send(Msg::Swap(tl(1))).unwrap();
-        q.send(Msg::Swap(tl(2))).unwrap();
-        assert!(matches!(q.try_recv(), Some(Msg::Swap(_))));
-        assert!(matches!(q.try_recv(), Some(Msg::Swap(_))));
+        q.send(Msg::Swap(tl(1), 1)).unwrap();
+        q.send(Msg::Swap(tl(2), 2)).unwrap();
+        assert!(matches!(q.try_recv(), Some(Msg::Swap(_, _))));
+        assert!(matches!(q.try_recv(), Some(Msg::Swap(_, _))));
         assert!(q.try_recv().is_none());
     }
 
     #[test]
     fn full_queue_rejects() {
         let q = AudioQueue::new(1);
-        assert!(q.send(Msg::Swap(tl(1))).is_ok());
-        assert!(q.send(Msg::Swap(tl(2))).is_err());
+        assert!(q.send(Msg::Swap(tl(1), 1)).is_ok());
+        assert!(q.send(Msg::Swap(tl(2), 2)).is_err());
     }
 
     #[test]
     fn fifo_order_preserved() {
         let q = AudioQueue::new(8);
         for i in 0..5 {
-            q.send(Msg::Swap(tl(i))).unwrap();
+            q.send(Msg::Swap(tl(i), i)).unwrap();
         }
         let mut gens = Vec::new();
         while let Some(m) = q.try_recv() {
-            if let Msg::Swap(tl) = m {
+            if let Msg::Swap(tl, _) = m {
                 gens.push(tl.generation);
             }
         }
@@ -97,13 +97,13 @@ mod tests {
     #[test]
     fn shutdown_is_delivered_in_order() {
         let q = AudioQueue::new(4);
-        q.send(Msg::Swap(tl(1))).unwrap();
+        q.send(Msg::Swap(tl(1), 1)).unwrap();
         q.send(Msg::Shutdown).unwrap();
-        q.send(Msg::Swap(tl(2))).unwrap();
+        q.send(Msg::Swap(tl(2), 2)).unwrap();
         let mut order = Vec::new();
         while let Some(m) = q.try_recv() {
             order.push(match m {
-                Msg::Swap(_) => "swap",
+                Msg::Swap(_, _) => "swap",
                 Msg::RecordStart(_) | Msg::RecordStop => "record",
                 Msg::Shutdown => "shutdown",
             });

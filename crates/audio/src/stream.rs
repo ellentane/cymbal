@@ -65,7 +65,7 @@ pub fn start_audio(
     let stream_config: cpal::StreamConfig = config.into();
 
     let mut engine = Engine::new(initial.tempo, stream_config.sample_rate.0);
-    engine.submit_swap(initial);
+    engine.submit_swap(initial, 1);
 
     let err_cb = move |e: cpal::StreamError| {
         on_error(Error::new(
@@ -82,7 +82,7 @@ pub fn start_audio(
             move |data: &mut [f32], _| {
                 while let Some(msg) = queue.try_recv() {
                     match msg {
-                        Msg::Swap(tl) => engine.submit_swap(tl),
+                        Msg::Swap(tl, seq) => engine.submit_swap(tl, seq),
                         Msg::RecordStart(rec) => engine.start_recording(rec),
                         Msg::RecordStop => engine.stop_recording(),
                         Msg::Shutdown => {
