@@ -9,7 +9,7 @@ impl Transport {
 
     pub fn new(tempo: f64, sample_rate: u32) -> Self {
         Self {
-            tempo: tempo.max(1.0),
+            tempo: tempo.clamp(1.0, 4000.0),
             sample_rate,
         }
     }
@@ -43,6 +43,16 @@ mod tests {
         let t = Transport::new(90.0, 48000);
         assert_eq!(t.beat_samples(), 32000);
         assert_eq!(t.bar_samples(), 128000);
+    }
+
+    #[test]
+    fn tempo_is_bounded_so_bar_samples_never_zero() {
+        for t in [1e9, 1e6, 4000.0, 4000.0001] {
+            let tr = Transport::new(t, 48000);
+            assert!(tr.beat_samples() > 0, "tempo {t}");
+            assert!(tr.bar_samples() > 0);
+        }
+        assert_eq!(Transport::new(4000.0, 48000).beat_samples(), 720);
     }
 
     #[test]
