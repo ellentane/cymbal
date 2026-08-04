@@ -65,7 +65,7 @@ pub fn start_audio(
         ))
     };
     let channels = stream_config.channels as usize;
-    let mut scratch = vec![0.0f32; stream_config.sample_rate.0 as usize];
+    let mut scratch = vec![0.0f32; stream_config.sample_rate.0 as usize * 2];
     let stream = device
         .build_output_stream(
             &stream_config,
@@ -80,13 +80,17 @@ pub fn start_audio(
                     }
                 }
                 let frames = data.len() / channels;
-                if frames > scratch.len() {
-                    scratch.resize(frames, 0.0);
+                if frames * 2 > scratch.len() {
+                    scratch.resize(frames * 2, 0.0);
                 }
-                engine.process(&mut scratch[..frames]);
-                for (i, frame) in scratch[..frames].iter().enumerate() {
+                // Task 8 placeholder: engine renders interleaved stereo; the
+                // mono downmix below is temporary until Task 11 replaces this
+                // callback with expand_to_device.
+                engine.process(&mut scratch[..frames * 2]);
+                for (i, ch) in scratch.chunks(2).take(frames).enumerate() {
+                    let mono = (ch[0] + ch[1]) * 0.5;
                     for out in data[i * channels..(i + 1) * channels].iter_mut() {
-                        *out = *frame;
+                        *out = mono;
                     }
                 }
             },
