@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::lexer::lex;
 use crate::mixer::{Master, VoiceOutput};
 use crate::parser::parse;
-use crate::scheduler::{SampleData, schedule};
+use crate::scheduler::{SampleData, Timeline, schedule};
 
 pub fn render_offline(
     src: &str,
@@ -17,9 +17,13 @@ pub fn render_offline(
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
     let timeline = schedule(&program, &HashMap::new(), samples, max_samples, sample_rate)?;
+    Ok(render_timeline(&timeline, max_samples, sample_rate))
+}
+
+fn render_timeline(timeline: &Timeline, max_samples: u64, sample_rate: u32) -> Vec<f32> {
     let mut master = Master::new(sample_rate, timeline.bar_samples);
     let mut out = vec![0.0f32; max_samples as usize * 2];
-    let events = timeline.events;
+    let events = timeline.events.clone();
     let mut idx = 0usize;
     let mut active: Vec<(u64, Voice, crate::scheduler::Event)> = Vec::new();
     for frame in 0..max_samples {
@@ -53,6 +57,35 @@ pub fn render_offline(
         master.end_frame(&mut frame_out);
         out[frame as usize * 2] = frame_out[0];
         out[frame as usize * 2 + 1] = frame_out[1];
+    }
+    out
+}
+
+/// ("master", full mix) + ("<loop>", dry stem) per loop, in declaration order.
+pub fn render_offline_tracks(
+    src: &str,
+    max_samples: u64,
+    sample_rate: u32,
+    samples: &HashMap<String, Arc<SampleData>>,
+) -> Result<Vec<(String, Vec<f32>)>> {
+    let tokens = lex(src)?;
+    let program = parse(&tokens)?;
+    let timeline = schedule(&program, &HashMap::new(), samples, max_samples, sample_rate)?;
+    let mut out = vec![(
+        "master".to_string(),
+        render_timeline(&timeline, max_samples, sample_rate),
+    )];
+    for loop_name in &timeline.loops {
+        let mut stem = timeline.clone();
+        stem.events.retain(|e| &e.loop_name == loop_name);
+        for ev in &mut stem.events {
+            ev.delay_send = 0.0;
+            ev.reverb_send = 0.0;
+        }
+        out.push((
+            loop_name.clone(),
+            render_timeline(&stem, max_samples, sample_rate),
+        ));
     }
     Ok(out)
 }
@@ -214,5 +247,42 @@ mod tests {
         let l2 = out[34000 * 2];
         let r2 = out[34000 * 2 + 1];
         assert!(r2 > l2, "late steps favor the right: {l2} vs {r2}");
+    }
+
+    #[test]
+    fn tracks_are_dry_per_loop() {
+        let src = "tempo 120\nlet kick = kick()\nlet hat = hat()\nloop \"k\":\n    kick << \"x\" delay=1.0\nloop \"h\":\n    hat << \"x\" reverb=1.0\n";
+        let tracks = render_offline_tracks(src, 96000, 48000, &HashMap::new()).unwrap();
+        let names: Vec<String> = tracks.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["master".to_string(), "k".to_string(), "h".to_string()]
+        );
+        let (_, master) = &tracks[0];
+        let (_, k) = &tracks[1];
+        let (_, h) = &tracks[2];
+        assert!(
+            master[0..16].iter().any(|s| s.abs() > 0.05),
+            "master has audio"
+        );
+        assert!(
+            k[0..16].iter().any(|s| s.abs() > 0.05),
+            "kick stem has audio"
+        );
+        assert!(
+            k[72000 * 2..72000 * 2 + 20].iter().all(|s| s.abs() < 1e-4),
+            "kick stem has no delay tail"
+        );
+        assert!(
+            h[20000 * 2..30000 * 2].iter().all(|s| s.abs() < 1e-3),
+            "hat stem has no reverb tail"
+        );
+    }
+
+    #[test]
+    fn tracks_are_empty_for_empty_program() {
+        let tracks = render_offline_tracks("", 4800, 48000, &HashMap::new()).unwrap();
+        assert_eq!(tracks.len(), 1, "only the master");
+        assert!(tracks[0].1.iter().all(|s| *s == 0.0));
     }
 }
