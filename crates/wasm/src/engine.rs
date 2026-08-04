@@ -180,3 +180,28 @@ pub unsafe extern "C" fn eng_process(e: *mut Eng, out: *mut f32, frames: u32) {
     }
     eng.position += frames as u64;
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn eng_out_ptr() -> *mut f32 {
+    static mut OUT: *mut f32 = std::ptr::null_mut();
+    unsafe {
+        if OUT.is_null() {
+            OUT = Box::into_raw(vec![0.0f32; 128 * 2].into_boxed_slice()) as *mut f32;
+        }
+        OUT
+    }
+}
+
+/// Scratch buffer for one `eng_submit` call; grows on demand.
+#[unsafe(no_mangle)]
+pub extern "C" fn eng_in_ptr(len: usize) -> *mut u8 {
+    static mut IN: *mut u8 = std::ptr::null_mut();
+    static mut IN_CAP: usize = 0;
+    unsafe {
+        if IN_CAP < len {
+            IN = Box::into_raw(vec![0u8; len].into_boxed_slice()) as *mut u8;
+            IN_CAP = len;
+        }
+        IN
+    }
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>cymbal web</title>
+  </head>
+  <body>
+    <textarea id="src" rows="12" cols="60">
+tempo 120
+let kick = kick()
+let hat = hat()
+loop "b":
+    kick << "x . . x . . x ."
+    hat << "x . x . x . x ."</textarea
+    >
+    <div>
+      <button id="play">play</button>
+      <button id="render">render wav</button>
+    </div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
