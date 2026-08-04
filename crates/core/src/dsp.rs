@@ -1,5 +1,7 @@
 use crate::ast::VoiceKind;
+use crate::scheduler::SampleData;
 use crate::transport::Transport;
+use std::sync::Arc;
 
 fn noise(t: u64) -> f64 {
     let x = t as f64 * 12.9898;
@@ -34,6 +36,12 @@ pub struct Lead {
     freq: f64,
     dur: u64,
 }
+pub struct Sample {
+    data: Arc<SampleData>,
+    pos: f64,
+    rate: f64,
+    t: u64,
+}
 
 pub enum Voice {
     Kick(Kick),
@@ -41,10 +49,16 @@ pub enum Voice {
     Hat(Hat),
     Bass(Bass),
     Lead(Lead),
+    Sample(Sample),
 }
 
 impl Voice {
-    pub fn new(kind: VoiceKind, pitch: Option<u8>) -> Self {
+    pub fn new(
+        kind: VoiceKind,
+        pitch: Option<u8>,
+        sample: Option<Arc<SampleData>>,
+        semitone: i32,
+    ) -> Self {
         use crate::scheduler::voice_default_duration;
         let dur = voice_default_duration(kind);
         match kind {
@@ -73,7 +87,12 @@ impl Voice {
                 freq: Transport::note_frequency(pitch.unwrap_or(60)),
                 dur,
             }),
-            VoiceKind::Sample => unreachable!("sample voices are rendered from buffers"),
+            VoiceKind::Sample => Voice::Sample(Sample {
+                data: sample.expect("sample voice requires sample data"),
+                pos: 0.0,
+                rate: 2f64.powf(semitone as f64 / 12.0),
+                t: 0,
+            }),
         }
     }
 
@@ -84,7 +103,31 @@ impl Voice {
             Voice::Hat(h) => h.next_sample(sr),
             Voice::Bass(b) => b.next_sample(sr),
             Voice::Lead(l) => l.next_sample(sr),
+            Voice::Sample(s) => s.next_sample(sr),
         }
+    }
+}
+
+impl Sample {
+    fn next_sample(&mut self, sr: u32) -> Option<f32> {
+        let sr_ratio = sr as f64 / self.data.sample_rate as f64;
+        let step = self.rate * sr_ratio;
+        let i = self.pos.floor() as usize;
+        if i >= self.data.frames.len() {
+            return None;
+        }
+        let out = if i + 1 >= self.data.frames.len() {
+            // last frame: no look-ahead available, play it verbatim
+            self.data.frames[i]
+        } else {
+            let a = self.data.frames[i] as f64;
+            let b = self.data.frames[i + 1] as f64;
+            let frac = self.pos - i as f64;
+            (a + (b - a) * frac) as f32
+        };
+        self.pos += step;
+        self.t += 1;
+        Some(out)
     }
 }
 
@@ -196,7 +239,7 @@ mod tests {
 
     fn render_all(kind: VoiceKind, pitch: Option<u8>) -> Vec<f32> {
         let dur = voice_default_duration(kind) as usize;
-        let mut v = Voice::new(kind, pitch);
+        let mut v = Voice::new(kind, pitch, None, 0);
         let mut out = Vec::with_capacity(dur);
         while let Some(s) = v.next_sample(48000) {
             out.push(s);
@@ -261,7 +304,7 @@ mod tests {
 
     #[test]
     fn voice_exhausts_and_returns_none() {
-        let mut v = Voice::new(VoiceKind::Hat, None);
+        let mut v = Voice::new(VoiceKind::Hat, None, None, 0);
         let mut n = 0;
         while v.next_sample(48000).is_some() {
             n += 1;
@@ -276,5 +319,53 @@ mod tests {
         let y1 = lp(1.0, 500.0, 0.7, 48000, &mut st);
         let y2 = lp(1.0, 500.0, 0.7, 48000, &mut st);
         assert_ne!(y1, y2, "lowpass state must persist between samples");
+    }
+
+    fn sample_voice(frames: Vec<f32>, semitone: i32) -> Voice {
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        Voice::new(VoiceKind::Sample, None, Some(Arc::new(data)), semitone)
+    }
+
+    #[test]
+    fn sample_plays_through_and_exhausts() {
+        let frames: Vec<f32> = (0..10).map(|i| i as f32 / 10.0).collect();
+        let mut v = sample_voice(frames, 0);
+        let mut out = Vec::new();
+        while let Some(s) = v.next_sample(48000) {
+            out.push(s);
+        }
+        assert_eq!(out.len(), 10, "all 10 frames play, including the last");
+        assert!(out.iter().all(|s| s.is_finite()));
+        assert!(v.next_sample(48000).is_none());
+    }
+
+    #[test]
+    fn sample_pitch_shift_changes_rate() {
+        let frames: Vec<f32> = vec![0.0; 48000];
+        let mut up = sample_voice(frames.clone(), 12);
+        let mut down = sample_voice(frames, -12);
+        let mut n_up = 0;
+        let mut n_down = 0;
+        while up.next_sample(48000).is_some() {
+            n_up += 1;
+        }
+        while down.next_sample(48000).is_some() {
+            n_down += 1;
+        }
+        assert_eq!(n_up, 24000, "@12 doubles rate, half the samples");
+        assert_eq!(n_down, 96000, "@-12 halves rate, ~double the samples");
+    }
+
+    #[test]
+    fn sample_interpolates_linearly() {
+        let frames = vec![0.0, 1.0];
+        let mut v = sample_voice(frames, 0);
+        let s0 = v.next_sample(48000).unwrap();
+        let s1 = v.next_sample(48000).unwrap();
+        assert_eq!(s0, 0.0);
+        assert_eq!(s1, 1.0);
     }
 }

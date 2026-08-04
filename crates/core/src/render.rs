@@ -16,7 +16,7 @@ pub fn render_offline(src: &str, max_samples: u64, sample_rate: u32) -> Result<V
     )?;
     let mut out = vec![0.0f32; max_samples as usize];
     for ev in &timeline.events {
-        let mut voice = Voice::new(ev.voice, ev.pitch);
+        let mut voice = Voice::new(ev.voice, ev.pitch, ev.sample.clone(), ev.semitone);
         let start = ev.sample_offset as usize;
         let end = (start + ev.duration as usize).min(out.len());
         for slot in out.iter_mut().take(end).skip(start) {

@@ -59,9 +59,10 @@ impl Engine {
             while let Some(at) = self.future.first().map(|s| s.at) {
                 if at <= now {
                     let s = self.future.remove(0);
+                    let e = &s.event;
                     self.active.push(Active {
-                        until: s.at + s.event.duration,
-                        voice: Voice::new(s.event.voice, s.event.pitch),
+                        until: s.at + e.duration,
+                        voice: Voice::new(e.voice, e.pitch, e.sample.clone(), e.semitone),
                     });
                 } else {
                     break;
