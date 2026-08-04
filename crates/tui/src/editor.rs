@@ -30,7 +30,6 @@ impl Editor {
         }
     }
 
-    #[allow(dead_code)]
     pub fn set_content(&mut self, content: String) {
         self.lines = content.split('\n').map(|s| s.to_string()).collect();
         self.x = 0;

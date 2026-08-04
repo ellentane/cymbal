@@ -197,6 +197,48 @@ fn record_loop(
     )));
 }
 
+fn spawn_reload(
+    src: String,
+    base: std::path::PathBuf,
+    latest: HashMap<String, u64>,
+    seq: u64,
+    msg_tx: mpsc::Sender<UiMsg>,
+    queue: Arc<AudioQueue>,
+) {
+    std::thread::spawn(move || match loop_names(&src) {
+        Ok(names) => {
+            let gens = next_loop_generations(&latest, &names);
+            match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
+                Ok(tl) => {
+                    let _ = msg_tx.send(UiMsg::Reloaded {
+                        generations: gens,
+                        loops: names,
+                        seq,
+                    });
+                    let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
+                }
+                Err(e) => {
+                    let _ = msg_tx.send(UiMsg::Err(e));
+                }
+            }
+        }
+        Err(e) => {
+            let _ = msg_tx.send(UiMsg::Err(e));
+        }
+    });
+}
+
+fn alt_transform_kind(code: KeyCode) -> Option<cymbal_core::transform::TransformKind> {
+    use cymbal_core::transform::TransformKind;
+    match code {
+        KeyCode::Char('r') => Some(TransformKind::Reverse),
+        KeyCode::Char('h') => Some(TransformKind::HalfSpeed),
+        KeyCode::Char('[') => Some(TransformKind::RotateLeft),
+        KeyCode::Char(']') => Some(TransformKind::RotateRight),
+        _ => None,
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -294,33 +336,11 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                     match k.code {
                         KeyCode::Char('s') => {
                             let src = editor.content();
-                            let queue = queue.clone();
-                            let tx = msg_tx.clone();
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                             let latest = latest_loops.clone();
                             reload_seq += 1;
                             let seq = reload_seq;
-                            std::thread::spawn(move || match loop_names(&src) {
-                                Ok(names) => {
-                                    let gens = next_loop_generations(&latest, &names);
-                                    match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
-                                        Ok(tl) => {
-                                            let _ = tx.send(UiMsg::Reloaded {
-                                                generations: gens,
-                                                loops: names,
-                                                seq,
-                                            });
-                                            let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
-                                        }
-                                        Err(e) => {
-                                            let _ = tx.send(UiMsg::Err(e));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(UiMsg::Err(e));
-                                }
-                            });
+                            spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
                             status.clear_error();
                             status.message = "reloading...".into();
                         }
@@ -404,62 +424,53 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                         KeyCode::Char('=') => {
                             status.raise_tempo();
                             let src = apply_tempo_override(&editor.content(), status.tempo);
-                            let queue = queue.clone();
-                            let tx = msg_tx.clone();
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-                            let gens = latest_loops
+                            let latest = latest_loops
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
                             reload_seq += 1;
                             let seq = reload_seq;
-                            std::thread::spawn(move || {
-                                match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
-                                    Ok(tl) => {
-                                        let names = loop_names(&src).unwrap_or_default();
-                                        let _ = tx.send(UiMsg::Reloaded {
-                                            generations: gens,
-                                            loops: names,
-                                            seq,
-                                        });
-                                        let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(UiMsg::Err(e));
-                                    }
-                                }
-                            });
+                            spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
                         }
                         KeyCode::Char('-') => {
                             status.lower_tempo();
                             let src = apply_tempo_override(&editor.content(), status.tempo);
-                            let queue = queue.clone();
-                            let tx = msg_tx.clone();
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-                            let gens = latest_loops
+                            let latest = latest_loops
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
                             reload_seq += 1;
                             let seq = reload_seq;
-                            std::thread::spawn(move || {
-                                match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
-                                    Ok(tl) => {
-                                        let names = loop_names(&src).unwrap_or_default();
-                                        let _ = tx.send(UiMsg::Reloaded {
-                                            generations: gens,
-                                            loops: names,
-                                            seq,
-                                        });
-                                        let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(UiMsg::Err(e));
-                                    }
-                                }
-                            });
+                            spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
                         }
                         _ => {}
+                    }
+                } else if k.modifiers.contains(KeyModifiers::ALT) {
+                    if let Some(kind) = alt_transform_kind(k.code) {
+                        let src = editor.content();
+                        match cymbal_core::transform::transform_src(&src, editor.cursor().1, kind) {
+                            Ok(new_src) => {
+                                editor.set_content(new_src);
+                                let base =
+                                    file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                                let latest = latest_loops.clone();
+                                reload_seq += 1;
+                                let seq = reload_seq;
+                                spawn_reload(
+                                    editor.content(),
+                                    base,
+                                    latest,
+                                    seq,
+                                    msg_tx.clone(),
+                                    queue.clone(),
+                                );
+                                status.clear_error();
+                                status.message = "transforming...".into();
+                            }
+                            Err(e) => status.set_error(e.to_string()),
+                        }
                     }
                 } else {
                     match k.code {
@@ -756,6 +767,21 @@ mod tests {
         assert_eq!(new.get("b"), Some(&2), "unchanged loop keeps generation");
         assert_eq!(new.get("h"), Some(&2));
         assert_eq!(new.get("k"), Some(&3), "new loop gets max+1");
+    }
+
+    #[test]
+    fn transform_alt_keys_map_to_kinds() {
+        use cymbal_core::transform::TransformKind;
+        let table = [
+            (KeyCode::Char('r'), TransformKind::Reverse),
+            (KeyCode::Char('h'), TransformKind::HalfSpeed),
+            (KeyCode::Char('['), TransformKind::RotateLeft),
+            (KeyCode::Char(']'), TransformKind::RotateRight),
+        ];
+        for (code, expected) in table {
+            assert_eq!(alt_transform_kind(code), Some(expected));
+        }
+        assert_eq!(alt_transform_kind(KeyCode::Char('q')), None);
     }
 
     #[test]
