@@ -93,4 +93,17 @@ mod tests {
             engine::eng_free(e);
         }
     }
+
+    #[wasm_bindgen_test]
+    fn engine_rejects_zero_bar_samples() {
+        unsafe {
+            let e = engine::eng_alloc(24000, 48000);
+            let bytes = [0u8; 16]; // bar_samples 0, count 0
+            engine::eng_submit(e, bytes.as_ptr(), bytes.len());
+            let mut out = vec![1.0f32; 128 * 2];
+            engine::eng_process(e, out.as_mut_ptr(), 128);
+            assert!(out.iter().all(|s| *s == 0.0));
+            engine::eng_free(e);
+        }
+    }
 }

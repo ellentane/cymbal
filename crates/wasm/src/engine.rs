@@ -87,14 +87,21 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
     }
     let eng = unsafe { &mut *e };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-    eng.bar_samples = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let bar_samples = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    if bar_samples == 0 {
+        return;
+    }
+    eng.bar_samples = bar_samples;
     let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-    if 16 + count * 32 > len {
+    let Some(records_len) = count.checked_mul(32) else {
+        return;
+    };
+    if 16 + records_len > len {
         return;
     }
     eng.future.clear();
     eng.active.clear();
-    for i in 0..count {
+    for i in 0..(records_len / 32) {
         let rec = &bytes[16 + i * 32..16 + (i + 1) * 32];
         let offset = u64::from_le_bytes(rec[0..8].try_into().unwrap());
         let kind = match rec[8] {
