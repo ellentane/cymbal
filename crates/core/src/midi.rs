@@ -29,7 +29,11 @@ pub fn build_timeline_midi(tl: &Timeline) -> Vec<MidiEvent> {
     for ev in &tl.events {
         let (channel, note) = match ev.voice {
             VoiceKind::Kick | VoiceKind::Snare | VoiceKind::Hat => (9, drum_note(ev.voice)),
-            VoiceKind::Bass | VoiceKind::Lead => (0, ev.pitch),
+            VoiceKind::Bass | VoiceKind::Lead => (
+                0,
+                ev.pitch
+                    .map(|p| ((p as i32 + ev.semitone).clamp(0, 127)) as u8),
+            ),
             VoiceKind::Sample => (0, None),
         };
         let Some(note) = note else { continue };
@@ -132,6 +136,25 @@ mod tests {
         let midi = build_timeline_midi(&tl);
         assert_eq!(midi[0].bytes, [0x90, 36, 127]);
         assert_eq!(midi[1].bytes, [0x80, 36, 0]);
+    }
+
+    #[test]
+    fn pitched_notes_follow_semitone_shift() {
+        let mut tl = tl_for(vec![(VoiceKind::Bass, Some(60), 1.0, 0, 14400)]);
+        tl.events[0].semitone = 3;
+        let midi = build_timeline_midi(&tl);
+        assert_eq!(
+            midi[0].bytes,
+            [0x90, 63, 127],
+            "x@3 shifts the midi note up"
+        );
+        tl.events[0].semitone = -4;
+        let midi = build_timeline_midi(&tl);
+        assert_eq!(
+            midi[0].bytes,
+            [0x90, 56, 127],
+            "x@-4 shifts the midi note down"
+        );
     }
 
     #[test]
