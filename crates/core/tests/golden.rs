@@ -15,6 +15,17 @@ fn decode_pcm16(wav: &[u8]) -> Vec<i16> {
 }
 
 fn assert_audio_matches(rendered: &[f32], golden: &[u8]) {
+    let peak = rendered.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+    assert!(
+        peak > 0.5,
+        "render peak {peak} too quiet; a silent render must not pass"
+    );
+    for frame in rendered.chunks(2) {
+        assert!(
+            (frame[0] - frame[1]).abs() < 1e-6,
+            "beat renders are center-pan and must be identical on both channels"
+        );
+    }
     let rendered = encode_wav(rendered, 48000, 2);
     let rendered = decode_pcm16(&rendered);
     let golden = decode_pcm16(golden);

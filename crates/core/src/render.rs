@@ -135,4 +135,48 @@ mod tests {
             ErrorKind::Parse
         );
     }
+
+    #[test]
+    fn sends_reach_delay_and_reverb() {
+        // 120 bpm at 48k: 4/4 bar = 96000 samples, delay tap = 0.75 * 96000 = 72000.
+        // Render 96000 = one bar, so a single kick hits at frame 0; the dry kick
+        // (duration 14400) has ended long before either send window.
+        let src_plain = "let kick = kick()\nloop \"b\":\n    kick << \"x\"\n";
+        let src_delay = "let kick = kick()\nloop \"b\":\n    kick << \"x\" delay=1.0\n";
+        let src_rev = "let kick = kick()\nloop \"b\":\n    kick << \"x\" reverb=1.0\n";
+        let plain = render(src_plain, 96000);
+        let delayed = render(src_delay, 96000);
+        let reverb = render(src_rev, 96000);
+        let window_has_energy = |out: &[f32], lo: usize, hi: usize, threshold: f32| {
+            out[lo * 2..hi * 2].iter().any(|s| s.abs() > threshold)
+        };
+        assert!(
+            window_has_energy(&plain, 0, 16, 0.05),
+            "dry kick must be audible at the start"
+        );
+        assert!(
+            window_has_energy(&delayed, 0, 16, 0.05),
+            "delayed render keeps the dry hit"
+        );
+        assert!(
+            window_has_energy(&reverb, 0, 16, 0.05),
+            "reverb render keeps the dry hit"
+        );
+        assert!(
+            !window_has_energy(&plain, 72000, 72020, 0.05),
+            "dry kick must end before the tap window"
+        );
+        assert!(
+            window_has_energy(&delayed, 72000, 72020, 0.05),
+            "echo of the second kick frame must land in the tap window"
+        );
+        assert!(
+            !window_has_energy(&plain, 20000, 30000, 1e-3),
+            "dry kick must end before the reverb window"
+        );
+        assert!(
+            window_has_energy(&reverb, 20000, 30000, 1e-3),
+            "comb feedback must keep the reverb tail audible"
+        );
+    }
 }
