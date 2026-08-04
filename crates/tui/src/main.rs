@@ -128,6 +128,42 @@ fn apply_tempo_override(src: &str, tempo: f64) -> String {
     lines.join("\n") + "\n"
 }
 
+fn record_loop(
+    rec: &Arc<cymbal_audio::recorder::Recorder>,
+    path: &std::path::Path,
+    tx: &mpsc::Sender<UiMsg>,
+    start: Instant,
+) {
+    let mut w = match cymbal_core::wav::WavWriter::create(path, SAMPLE_RATE, 2) {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = tx.send(UiMsg::Info(format!(
+                "cannot create {}: {e}",
+                path.display()
+            )));
+            return;
+        }
+    };
+    loop {
+        if let Some(block) = rec.take_filled() {
+            if w.write_interleaved(&block).is_err() {
+                break;
+            }
+            rec.return_block(block);
+        } else if rec.is_stopped() {
+            break;
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let _ = w.finalize();
+    let secs = start.elapsed().as_secs_f32();
+    let _ = tx.send(UiMsg::Info(format!(
+        "recorded {} ({secs:.1}s)",
+        path.display()
+    )));
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -252,7 +288,10 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 status.recording = false;
                                 let _ = queue.send(Msg::RecordStop);
                                 if let Some(w) = record_writer.take() {
-                                    let _ = w.join();
+                                    let deadline = Instant::now() + Duration::from_secs(2);
+                                    while !w.is_finished() && Instant::now() < deadline {
+                                        std::thread::sleep(Duration::from_millis(10));
+                                    }
                                 }
                             }
                             break;
@@ -271,38 +310,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 let tx = msg_tx.clone();
                                 let start = Instant::now();
                                 record_writer = Some(std::thread::spawn(move || {
-                                    let mut w = match cymbal_core::wav::WavWriter::create(
-                                        &path,
-                                        SAMPLE_RATE,
-                                        2,
-                                    ) {
-                                        Ok(w) => w,
-                                        Err(e) => {
-                                            let _ = tx.send(UiMsg::Info(format!(
-                                                "cannot create {}: {e}",
-                                                path.display()
-                                            )));
-                                            return;
-                                        }
-                                    };
-                                    loop {
-                                        if let Some(block) = rec.take_filled() {
-                                            if w.write_interleaved(&block).is_err() {
-                                                break;
-                                            }
-                                            rec.return_block(block);
-                                        } else if rec.is_stopped() {
-                                            break;
-                                        } else {
-                                            std::thread::sleep(Duration::from_millis(5));
-                                        }
-                                    }
-                                    let _ = w.finalize();
-                                    let secs = start.elapsed().as_secs_f32();
-                                    let _ = tx.send(UiMsg::Info(format!(
-                                        "recorded {} ({secs:.1}s)",
-                                        path.display()
-                                    )));
+                                    record_loop(&rec, &path, &tx, start)
                                 }));
                                 status.recording = true;
                                 status.clear_error();
@@ -581,5 +589,25 @@ mod tests {
         assert_eq!(new.get("b"), Some(&2), "unchanged loop keeps generation");
         assert_eq!(new.get("h"), Some(&2));
         assert_eq!(new.get("k"), Some(&3), "new loop gets max+1");
+    }
+
+    #[test]
+    fn record_loop_writes_and_finalizes() {
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        let mut block = rec.take_pool_block();
+        block[..4].copy_from_slice(&[0.5, 0.5, -0.5, -0.5]);
+        rec.push_filled(block);
+        rec.stop();
+        let path = std::env::temp_dir().join(format!("cymbal_rec_{}.wav", std::process::id()));
+        let (tx, _rx) = mpsc::channel::<UiMsg>();
+        let rec2 = rec.clone();
+        let path2 = path.clone();
+        std::thread::spawn(move || record_loop(&rec2, &path2, &tx, Instant::now()))
+            .join()
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let data = cymbal_core::wav::decode_wav(&bytes).unwrap();
+        assert_eq!(data.frames.as_slice(), &[0.5, -0.5, 0.0, 0.0]);
+        let _ = std::fs::remove_file(&path);
     }
 }
