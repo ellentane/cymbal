@@ -396,4 +396,62 @@ mod tests {
         engine.process(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
     }
+
+    #[test]
+    fn swap_rebases_grid_on_tempo_change() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(vec![], 0, vec![], 24000));
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(tl(
+            vec![
+                ev(0, VoiceKind::Kick, 1, 2400),
+                ev(12000, VoiceKind::Kick, 1, 2400),
+            ],
+            1,
+            vec![("b".into(), 1)],
+            12000,
+        ));
+        let out = engine_step(&mut engine, 24000);
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "kick at origin + 0 on the new grid"
+        );
+        assert!(
+            out[4800 * 2..4800 * 2 + 8].iter().all(|s| *s == 0.0),
+            "silence between the two kicks"
+        );
+        assert!(
+            out[12000 * 2..12000 * 2 + 16].iter().any(|s| *s != 0.0),
+            "kick at origin + 12000 (new bar_samples)"
+        );
+        assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn large_buffer_spans_multiple_boundaries() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(vec![], 0, vec![], 24000));
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(tl(
+            vec![ev(0, VoiceKind::Hat, 1, 2400)],
+            1,
+            vec![("b".into(), 1)],
+            24000,
+        ));
+        let out = engine_step(&mut engine, 72000);
+        assert_eq!(out.len(), 72000 * 2, "three bars of stereo");
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "swap applied at the first boundary (buffer frame 0)"
+        );
+        assert!(
+            out[24000 * 2..24000 * 2 + 16].iter().all(|s| *s == 0.0),
+            "second boundary is a no-op: nothing scheduled at origin + 24000"
+        );
+        assert!(
+            out[48000 * 2..48000 * 2 + 16].iter().all(|s| *s == 0.0),
+            "third boundary is a no-op"
+        );
+        assert!(out.iter().all(|s| s.is_finite()));
+    }
 }
