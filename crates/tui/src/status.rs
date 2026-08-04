@@ -4,6 +4,8 @@ pub struct Status {
     pub bar: u64,
     pub loops: Vec<String>,
     pub latency_ms: Option<f32>,
+    pub recording: bool,
+    pub record_elapsed_secs: u64,
     pub error: Option<String>,
     pub message: String,
 }
@@ -15,6 +17,8 @@ impl Status {
             bar: 0,
             loops: Vec::new(),
             latency_ms: None,
+            recording: false,
+            record_elapsed_secs: 0,
             error: None,
             message: "Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo".into(),
         }
@@ -30,10 +34,17 @@ impl Status {
             .latency_ms
             .map(|ms| format!("~{ms:.1}ms"))
             .unwrap_or_else(|| "-".into());
+        let rec = if self.recording {
+            let mm = self.record_elapsed_secs / 60;
+            let ss = self.record_elapsed_secs % 60;
+            format!("REC {mm:02}:{ss:02}")
+        } else {
+            "rec -".into()
+        };
         let msg = self.error.clone().unwrap_or_else(|| self.message.clone());
         format!(
-            "tempo {:.0} | bar {} | loops {} | lat {} | {}",
-            self.tempo, self.bar, loops, lat, msg
+            "tempo {:.0} | bar {} | loops {} | lat {} | {} | {}",
+            self.tempo, self.bar, loops, lat, rec, msg
         )
     }
 
@@ -84,7 +95,7 @@ mod tests {
         s.latency_ms = Some(5.3333335);
         assert_eq!(
             s.render(),
-            "tempo 120 | bar 0 | loops b, h | lat ~5.3ms | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
+            "tempo 120 | bar 0 | loops b, h | lat ~5.3ms | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
         );
     }
 
@@ -93,8 +104,22 @@ mod tests {
         let s = Status::new();
         assert_eq!(
             s.render(),
-            "tempo 120 | bar 0 | loops - | lat - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
+            "tempo 120 | bar 0 | loops - | lat - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
         );
+    }
+
+    #[test]
+    fn render_shows_recording() {
+        let mut s = Status::new();
+        s.recording = true;
+        s.record_elapsed_secs = 12;
+        assert!(s.render().contains("REC 00:12"));
+    }
+
+    #[test]
+    fn render_shows_not_recording() {
+        let s = Status::new();
+        assert!(s.render().contains("rec -"));
     }
 
     #[test]

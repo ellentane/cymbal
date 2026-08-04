@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -209,6 +209,10 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
 
     let mut editor = Editor::new(src);
 
+    let mut recording = false;
+    let mut record_start: Option<Instant> = None;
+    let mut record_writer: Option<std::thread::JoinHandle<()>> = None;
+
     let result = (|| -> io::Result<()> {
         loop {
             if event::poll(Duration::from_millis(50))?
@@ -242,7 +246,74 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                             status.clear_error();
                             status.message = "reloading...".into();
                         }
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => {
+                            if recording {
+                                recording = false;
+                                status.recording = false;
+                                let _ = queue.send(Msg::RecordStop);
+                                if let Some(w) = record_writer.take() {
+                                    let _ = w.join();
+                                }
+                            }
+                            break;
+                        }
+                        KeyCode::Char('r') => {
+                            if !recording {
+                                recording = true;
+                                record_start = Some(Instant::now());
+                                let rec = cymbal_audio::recorder::Recorder::new(32, 4096);
+                                let rec_for_queue = rec.clone();
+                                let _ = queue.send(Msg::RecordStart(rec_for_queue));
+                                let path = file
+                                    .parent()
+                                    .map(|p| p.join("recording.wav"))
+                                    .unwrap_or_else(|| std::path::PathBuf::from("recording.wav"));
+                                let tx = msg_tx.clone();
+                                let start = Instant::now();
+                                record_writer = Some(std::thread::spawn(move || {
+                                    let mut w = match cymbal_core::wav::WavWriter::create(
+                                        &path,
+                                        SAMPLE_RATE,
+                                        2,
+                                    ) {
+                                        Ok(w) => w,
+                                        Err(e) => {
+                                            let _ = tx.send(UiMsg::Info(format!(
+                                                "cannot create {}: {e}",
+                                                path.display()
+                                            )));
+                                            return;
+                                        }
+                                    };
+                                    loop {
+                                        if let Some(block) = rec.take_filled() {
+                                            if w.write_interleaved(&block).is_err() {
+                                                break;
+                                            }
+                                            rec.return_block(block);
+                                        } else if rec.is_stopped() {
+                                            break;
+                                        } else {
+                                            std::thread::sleep(Duration::from_millis(5));
+                                        }
+                                    }
+                                    let _ = w.finalize();
+                                    let secs = start.elapsed().as_secs_f32();
+                                    let _ = tx.send(UiMsg::Info(format!(
+                                        "recorded {} ({secs:.1}s)",
+                                        path.display()
+                                    )));
+                                }));
+                                status.recording = true;
+                                status.clear_error();
+                                status.message = "recording...".into();
+                            } else {
+                                recording = false;
+                                let _ = queue.send(Msg::RecordStop);
+                                status.recording = false;
+                                status.message = "stopping...".into();
+                            }
+                        }
                         KeyCode::Char('e') => {
                             let src = editor.content();
                             let out_path = file
@@ -350,6 +421,9 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                     latest_loops = lg.clone();
                 }
                 apply_ui_msg(&mut status, msg);
+            }
+            if recording && let Some(start) = record_start {
+                status.record_elapsed_secs = start.elapsed().as_secs();
             }
             terminal.draw(|f| {
                 let chunks = Layout::default()
