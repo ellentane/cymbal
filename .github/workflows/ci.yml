@@ -24,3 +24,17 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - run: cargo build -p cymbal-wasm --target wasm32-unknown-unknown
+      - name: wasm tests (node)
+        working-directory: crates/wasm
+        run: cargo test --target wasm32-unknown-unknown
