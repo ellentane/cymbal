@@ -3,6 +3,7 @@ use std::sync::Arc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cymbal_core::error::{Error, ErrorKind, Span};
 use cymbal_core::scheduler::Timeline;
+use cymbal_core::transport::Transport;
 
 use crate::engine::Engine;
 use crate::resampler::Resampler;
@@ -66,7 +67,7 @@ pub fn start_audio(
         .map_err(|_| AudioError::NoDefaultConfig)?;
     let stream_config: cpal::StreamConfig = config.into();
 
-    let mut engine = Engine::new(initial.tempo, 48000);
+    let mut engine = Engine::new(initial.tempo, Transport::SAMPLE_RATE);
     engine.submit_swap(initial, 1);
 
     let err_cb = move |e: cpal::StreamError| {
@@ -79,7 +80,7 @@ pub fn start_audio(
     let channels = stream_config.channels as usize;
     let device_rate = stream_config.sample_rate.0;
     let mut resampler = Resampler::new(device_rate);
-    let mut scratch = vec![0.0f32; 48000 * 2];
+    let mut scratch = vec![0.0f32; Transport::SAMPLE_RATE as usize * 2];
     let mut stereo = vec![0.0f32; stream_config.sample_rate.0 as usize * 2];
     let stream = device
         .build_output_stream(
@@ -97,7 +98,9 @@ pub fn start_audio(
                     }
                 }
                 let frames = data.len() / channels;
-                let needed = resampler.frames_needed(frames) - resampler.buffered_frames();
+                let needed = resampler
+                    .frames_needed(frames)
+                    .saturating_sub(resampler.buffered_frames());
                 if needed > 0 {
                     if needed * 2 > scratch.len() {
                         scratch.resize(needed * 2, 0.0);
