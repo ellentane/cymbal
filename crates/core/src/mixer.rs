@@ -78,6 +78,7 @@ impl Allpass {
 
 impl Master {
     pub fn new(sample_rate: u32, bar_samples: u64) -> Self {
+        // slowest tempo 20 bpm -> bar 576000; delay tap 0.75 bar = 432000 + margin
         let max_bar = Transport::new(20.0, sample_rate).bar_samples();
         let delay_len = (0.75 * max_bar as f64) as usize + 1024;
         Self {
@@ -147,13 +148,13 @@ impl Master {
     }
 
     fn delay_tick(&mut self, input: f32, is_l: bool) -> f32 {
-        let len = self.delay_l.len();
-        let tap = ((0.75 * self.bar_samples as f64) as usize).min(len);
         let (buf, pos) = if is_l {
             (&mut self.delay_l, &mut self.delay_pos_l)
         } else {
             (&mut self.delay_r, &mut self.delay_pos_r)
         };
+        let len = buf.len();
+        let tap = ((0.75 * self.bar_samples as f64) as usize).min(len);
         let tap_pos = (*pos + len - tap) % len;
         let out = buf[tap_pos];
         buf[*pos] = input + out * self.delay_feedback;
