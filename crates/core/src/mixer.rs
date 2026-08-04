@@ -72,7 +72,7 @@ impl Allpass {
 
 impl Master {
     pub fn new(sample_rate: u32, bar_samples: u64) -> Self {
-        // slowest tempo 20 bpm -> bar 144000; dotted-eighth 108000 + margin
+        // slowest tempo 20 bpm -> bar 576000; delay tap 0.75 bar = 432000 + margin
         let max_bar = Transport::new(20.0, sample_rate).bar_samples();
         let delay_len = (0.75 * max_bar as f64) as usize + 1024;
         Self {
@@ -124,7 +124,7 @@ impl Master {
 
     fn delay_tick(&mut self, input: f32) -> f32 {
         let len = self.delay.len();
-        let tap = (0.75 * self.bar_samples as f64) as usize;
+        let tap = ((0.75 * self.bar_samples as f64) as usize).min(len);
         let tap_pos = (self.delay_pos + len - tap) % len;
         let out = self.delay[tap_pos];
         self.delay[self.delay_pos] = input + out * self.delay_feedback;
@@ -210,6 +210,60 @@ mod tests {
         m.begin_frame();
         m.end_frame(&mut out);
         assert_eq!(out, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn set_bar_samples_changes_delay_timing() {
+        let mut m = Master::new(48000, 24000);
+        m.set_bar_samples(12000);
+        let mut taps = Vec::new();
+        for i in 0..12000 {
+            let v = if i == 0 {
+                VoiceOutput {
+                    sample: 1.0,
+                    velocity: 1.0,
+                    pan: 0.0,
+                    delay_send: 1.0,
+                    reverb_send: 0.0,
+                }
+            } else {
+                VoiceOutput {
+                    sample: 0.0,
+                    velocity: 1.0,
+                    pan: 0.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                }
+            };
+            let out = frame(&mut m, &[v]);
+            if i > 0 && out[0].abs() > 0.05 {
+                taps.push(i);
+            }
+        }
+        assert_eq!(
+            taps.first().copied(),
+            Some(9000),
+            "first echo at 0.75 * 12000"
+        );
+    }
+
+    #[test]
+    fn delay_tick_survives_pathological_bar_samples() {
+        for bar_samples in [2_304_000, u64::MAX] {
+            let mut m = Master::new(48000, 24000);
+            m.set_bar_samples(bar_samples);
+            let v = VoiceOutput {
+                sample: 1.0,
+                velocity: 1.0,
+                pan: 0.0,
+                delay_send: 1.0,
+                reverb_send: 0.0,
+            };
+            for _ in 0..200 {
+                let out = frame(&mut m, &[v]);
+                assert!(out[0].is_finite() && out[1].is_finite());
+            }
+        }
     }
 
     #[test]
