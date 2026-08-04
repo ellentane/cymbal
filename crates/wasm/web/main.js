@@ -1,12 +1,15 @@
-import { compile_events, render, serialize_timeline } from './cymbal_wasm.js';
+import init, { render, serialize_timeline } from './cymbal_wasm.js';
 
 const ctx = new AudioContext({ sampleRate: 48000 });
 let node = null;
 
+let ready = init();
+
 async function play(src) {
   if (!node) {
+    await ctx.resume();
     await ctx.audioWorklet.addModule('worklet.js');
-    node = new AudioWorkletNode(ctx, 'cymbal');
+    node = new AudioWorkletNode(ctx, 'cymbal', { outputChannelCount: [2] });
     node.connect(ctx.destination);
   }
   const bytes = serialize_timeline(src, 3600);
@@ -15,9 +18,11 @@ async function play(src) {
 
 const srcInput = document.getElementById('src');
 document.getElementById('play').onclick = async () => {
+  await ready;
   await play(srcInput.value);
 };
-document.getElementById('render').onclick = () => {
+document.getElementById('render').onclick = async () => {
+  await ready;
   const seconds = 4;
   const out = render(srcInput.value, seconds);
   const wav = new Uint8Array(44 + out.length * 4);

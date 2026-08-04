@@ -1,6 +1,7 @@
 /target/
 /docs/superpowers/
 /.worktrees/
+crates/wasm/web/cymbal_wasm*
 *.wav
 !crates/core/tests/data/
 

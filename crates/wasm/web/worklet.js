@@ -38,6 +38,7 @@ class CymbalProcessor extends AudioWorkletProcessor {
     super();
     this.ready = loadEngine().then(() => true);
     this.port.onmessage = (e) => {
+      if (!self.eng) return;
       const bytes = new Uint8Array(e.data);
       const ptr = self.eng.eng_in_ptr(bytes.length);
       new Uint8Array(mem.buffer).set(bytes, ptr);
