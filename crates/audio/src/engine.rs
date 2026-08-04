@@ -121,10 +121,9 @@ impl Engine {
         if self.rec_state.is_some() {
             self.stop_recording();
         }
-        let block_frames = rec.block_frames();
         self.rec_state = Some(RecState {
-            rec,
-            current: vec![0.0f32; block_frames * 2].into_boxed_slice(),
+            rec: rec.clone(),
+            current: rec.take_pool_block(),
             pos: 0,
         });
     }
@@ -599,6 +598,45 @@ mod tests {
             "second recording captures post-master signal"
         );
         assert!(rec1.is_stopped());
+        assert!(rec2.is_stopped());
+    }
+
+    #[test]
+    fn recording_restart_guard_flushes_previous() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Hat, 0, 2400)],
+                0,
+                vec![("b".into(), 0)],
+                24000,
+            ),
+            1,
+        );
+        let rec1 = Recorder::new(4, 4);
+        engine.start_recording(rec1.clone());
+        engine_step(&mut engine, 3);
+        let rec2 = Recorder::new(4, 4);
+        engine.start_recording(rec2.clone());
+        assert!(
+            rec1.is_stopped(),
+            "restart must stop the previous recording"
+        );
+        let b1 = rec1.take_filled().unwrap();
+        assert!(
+            b1[..6].iter().any(|s| *s != 0.0),
+            "previous recording's partial block contains audio"
+        );
+        assert_eq!(&b1[6..], &[0.0, 0.0], "unfilled tail is zeroed");
+        assert!(rec1.take_filled().is_none());
+        engine_step(&mut engine, 4);
+        engine.stop_recording();
+        let blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec2.take_filled()).collect();
+        assert_eq!(blocks.len(), 1, "second recording = one full block");
+        assert!(
+            blocks[0][..8].iter().any(|s| *s != 0.0),
+            "second recording captures post-master signal"
+        );
         assert!(rec2.is_stopped());
     }
 
