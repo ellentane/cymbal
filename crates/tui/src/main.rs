@@ -160,13 +160,13 @@ fn apply_tempo_override(src: &str, tempo: f64) -> String {
     lines.join("\n") + "\n"
 }
 
-fn recording_path(dir: &std::path::Path, ts: &str) -> std::path::PathBuf {
+fn free_path(dir: &std::path::Path, stem: &str) -> std::path::PathBuf {
     let mut n = 1;
     loop {
         let name = if n == 1 {
-            format!("recording-{ts}.wav")
+            format!("{stem}.wav")
         } else {
-            format!("recording-{ts}-{n}.wav")
+            format!("{stem}-{n}.wav")
         };
         let path = dir.join(name);
         if !path.exists() {
@@ -174,6 +174,10 @@ fn recording_path(dir: &std::path::Path, ts: &str) -> std::path::PathBuf {
         }
         n += 1;
     }
+}
+
+fn recording_path(dir: &std::path::Path, ts: &str) -> std::path::PathBuf {
+    free_path(dir, &format!("recording-{ts}"))
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -425,10 +429,10 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 }));
                                 for (name, rec) in &tracks {
                                     let rec = rec.clone();
-                                    let path = dir.join(format!(
-                                        "recording-{ts}-{}.wav",
-                                        sanitize_name(name)
-                                    ));
+                                    let path = free_path(
+                                        &dir,
+                                        &format!("recording-{ts}-{}", sanitize_name(name)),
+                                    );
                                     let tx = msg_tx.clone();
                                     let start = Instant::now();
                                     writers.push(std::thread::spawn(move || {
@@ -567,6 +571,7 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                         recording = false;
                         record_start = None;
                         record_writers = Vec::new();
+                        let _ = queue.send(Msg::RecordStop);
                         status.recording = false;
                         status.set_error(s);
                     }
@@ -916,5 +921,18 @@ mod tests {
         assert_eq!(sanitize_name("beat 1"), "beat-1");
         assert_eq!(sanitize_name("a/b\\c:d"), "a-b-c-d");
         assert_eq!(sanitize_name("plain"), "plain");
+    }
+
+    #[test]
+    fn colliding_sanitized_names_get_distinct_paths() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("cymbal_collide_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stem = |name: &str| format!("recording-20260804-153245-{}", sanitize_name(name));
+        let p1 = free_path(&dir, &stem("beat 1"));
+        std::fs::File::create(&p1).unwrap().write_all(b"x").unwrap();
+        let p2 = free_path(&dir, &stem("beat-1"));
+        assert_ne!(p1, p2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
