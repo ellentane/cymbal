@@ -357,16 +357,10 @@ mod tests {
     use crate::scheduler::voice_default_duration;
 
     fn render_all(kind: VoiceKind, pitch: Option<u8>) -> Vec<f32> {
-        let dur = voice_default_duration(kind) as usize;
-        let mut v = Voice::new(kind, VoiceParams::default_for(kind, pitch), 48000);
-        let mut out = Vec::with_capacity(dur);
-        while let Some(s) = v.next_sample(48000) {
-            out.push(s);
-        }
-        out
+        render_all_params(kind, VoiceParams::default_for(kind, pitch))
     }
 
-    fn render_all_params(kind: VoiceKind, _pitch: Option<u8>, params: VoiceParams) -> Vec<f32> {
+    fn render_all_params(kind: VoiceKind, params: VoiceParams) -> Vec<f32> {
         let dur = voice_default_duration(kind) as usize;
         let mut v = Voice::new(kind, params, 48000);
         let mut out = Vec::with_capacity(dur);
@@ -661,17 +655,18 @@ mod tests {
 
     #[test]
     fn synth_semitone_equals_pitch_shift() {
-        // bass @12 must be bit-identical to bass() at c5 (pitch 72, semitone 0)
-        let shifted = render_all_params(
-            VoiceKind::Bass,
-            Some(60),
-            VoiceParams {
-                semitone: 12,
-                ..VoiceParams::default_for(VoiceKind::Bass, Some(60))
-            },
-        );
-        let plain = render_all(VoiceKind::Bass, Some(72));
-        assert_eq!(shifted, plain, "bass@12 == bass c5");
+        // kind @12 must be bit-identical to kind at +1 octave (pitch 72, semitone 0)
+        for kind in [VoiceKind::Bass, VoiceKind::Lead] {
+            let shifted = render_all_params(
+                kind,
+                VoiceParams {
+                    semitone: 12,
+                    ..VoiceParams::default_for(kind, Some(60))
+                },
+            );
+            let plain = render_all(kind, Some(72));
+            assert_eq!(shifted, plain, "{kind:?}@12 == {kind:?} c5");
+        }
     }
 
     #[test]
@@ -679,7 +674,6 @@ mod tests {
         let k0 = render_all(VoiceKind::Kick, None);
         let k12 = render_all_params(
             VoiceKind::Kick,
-            None,
             VoiceParams {
                 semitone: 12,
                 ..VoiceParams::default_for(VoiceKind::Kick, None)
