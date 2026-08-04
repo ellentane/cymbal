@@ -1,0 +1,61 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use cymbal_core::ast::Program;
+use cymbal_core::error::{Error, ErrorKind, Span};
+use cymbal_core::scheduler::{SampleData, sample_paths};
+
+#[cfg_attr(not(test), expect(dead_code))]
+pub fn load_samples(
+    program: &Program,
+    base_dir: &Path,
+) -> Result<HashMap<String, Arc<SampleData>>, Error> {
+    let mut out = HashMap::new();
+    for path in sample_paths(program) {
+        let full = base_dir.join(&path);
+        let bytes = std::fs::read(&full).map_err(|e| {
+            Error::new(
+                Span { line: 0, col: 0 },
+                ErrorKind::Io,
+                format!("cannot read {}: {e}", full.display()),
+            )
+        })?;
+        let data = cymbal_core::wav::decode_wav(&bytes)?;
+        out.insert(path, Arc::new(data));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cymbal_core::lexer::lex;
+    use cymbal_core::parser::parse;
+    use cymbal_core::wav::encode_wav;
+
+    #[test]
+    fn loads_samples_relative_to_base_dir() {
+        let dir = std::env::temp_dir();
+        let wav_path = dir.join(format!("cymbal_smp_{}.wav", std::process::id()));
+        std::fs::write(&wav_path, encode_wav(&[0.0, 1.0, -1.0], 48000, 1)).unwrap();
+        let src = format!(
+            "loop \"b\":\n    sample \"{}\" << \"x\"\n",
+            wav_path.file_name().unwrap().to_str().unwrap()
+        );
+        let program = parse(&lex(&src).unwrap()).unwrap();
+        let samples = load_samples(&program, &dir).unwrap();
+        assert_eq!(samples.len(), 1);
+        let data = samples.values().next().unwrap();
+        assert_eq!(data.frames.as_slice(), &[0.0, 32767.0 / 32768.0, -1.0]);
+        let _ = std::fs::remove_file(&wav_path);
+    }
+
+    #[test]
+    fn missing_sample_reports_error() {
+        let program =
+            parse(&lex("loop \"b\":\n    sample \"nope.wav\" << \"x\"\n").unwrap()).unwrap();
+        let err = load_samples(&program, std::path::Path::new("/nonexistent")).unwrap_err();
+        assert!(err.message.contains("nope.wav"));
+    }
+}

@@ -1,5 +1,6 @@
 mod editor;
 mod highlight;
+mod samples;
 mod status;
 
 use std::io;
