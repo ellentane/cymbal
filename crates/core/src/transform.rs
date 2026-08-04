@@ -21,21 +21,29 @@ pub fn tokenize_pattern(s: &str) -> Result<Vec<String>> {
             'x' => {
                 let mut tok = String::from("x");
                 i += 1;
-                let mut in_number = false;
+                let mut modifier = None;
                 while i < chars.len() {
                     let c = chars[i];
-                    if c == '!' || c == '@' {
-                        tok.push(c);
-                        i += 1;
-                        in_number = true;
-                    } else if c.is_ascii_digit()
-                        || (c == '-' && in_number)
-                        || (c == '.' && in_number)
-                    {
-                        tok.push(c);
-                        i += 1;
-                    } else {
-                        break;
+                    match modifier {
+                        None if c == '!' || c == '@' => {
+                            modifier = Some(c);
+                            tok.push(c);
+                            i += 1;
+                        }
+                        Some('!') if c == '@' => {
+                            modifier = Some('@');
+                            tok.push(c);
+                            i += 1;
+                        }
+                        Some('!') if c.is_ascii_digit() || c == '.' => {
+                            tok.push(c);
+                            i += 1;
+                        }
+                        Some('@') if c.is_ascii_digit() || (c == '-' && tok.ends_with('@')) => {
+                            tok.push(c);
+                            i += 1;
+                        }
+                        _ => break,
                     }
                 }
                 tokens.push(tok);
@@ -93,11 +101,19 @@ pub fn apply_kind(pattern: &str, kind: TransformKind) -> Result<String> {
     Ok(out.join(" "))
 }
 
+fn char_col_to_byte(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col.saturating_sub(1))
+        .map(|(i, _)| i)
+        .unwrap_or(line.len())
+}
+
 /// Apply `kind` to the pattern string on the given 0-based line of `src`.
 /// The line must be a bind line whose pattern is a string or a tuple's string.
 pub fn transform_src(src: &str, line: usize, kind: TransformKind) -> Result<String> {
     let program = parse(&lex(src)?)?;
-    let mut target: Option<(usize, usize, String)> = None; // (start_idx, end_idx, old)
+    let mut lines: Vec<String> = src.lines().map(|s| s.to_string()).collect();
+    let mut target: Option<(usize, usize, String)> = None; // (start_idx, end_idx, new_pattern)
     for stmt in &program.statements {
         let Stmt::Loop(l) = stmt else { continue };
         for bind in &l.binds {
@@ -109,25 +125,22 @@ pub fn transform_src(src: &str, line: usize, kind: TransformKind) -> Result<Stri
             if span.line != line as u32 + 1 {
                 continue;
             }
-            let raw = src.lines().nth(line).ok_or_else(|| {
+            let raw = lines.get(line).ok_or_else(|| {
                 Error::new(
                     Span { line: 1, col: 1 },
                     ErrorKind::Eval,
                     "line out of range",
                 )
             })?;
-            let col = span.col as usize;
-            let start = if col > 1 && raw.as_bytes()[col - 1] == b'"' {
-                raw[..col - 1].rfind('"').ok_or_else(|| {
+            let byte = char_col_to_byte(raw, span.col as usize);
+            let start = if raw.as_bytes().get(byte) == Some(&b'"') {
+                raw[..byte].rfind('"').ok_or_else(|| {
                     Error::new(*span, ErrorKind::Eval, "no pattern string on line")
                 })?
             } else {
-                raw[col - 1..]
-                    .find('"')
-                    .map(|i| col - 1 + i)
-                    .ok_or_else(|| {
-                        Error::new(*span, ErrorKind::Eval, "no pattern string on line")
-                    })?
+                raw[byte..].find('"').map(|i| byte + i).ok_or_else(|| {
+                    Error::new(*span, ErrorKind::Eval, "no pattern string on line")
+                })?
             };
             let rest = &raw[start + 1..];
             let close = rest
@@ -149,7 +162,6 @@ pub fn transform_src(src: &str, line: usize, kind: TransformKind) -> Result<Stri
             "no pattern on this line",
         )
     })?;
-    let mut lines: Vec<String> = src.lines().map(|s| s.to_string()).collect();
     let raw = &lines[line];
     lines[line] = format!("{}{}{}", &raw[..start + 1], new_pattern, &raw[end..]);
     let was_nl = src.ends_with('\n');
@@ -283,5 +295,68 @@ mod tests {
             panic!()
         };
         assert_eq!(p, "x x . . x x . .");
+    }
+
+    #[test]
+    fn multibyte_in_pattern_does_not_panic() {
+        let src = "loop \"b\":\n    kick << \"x . 🎉 x\"\n";
+        let err = transform_src(src, 1, TransformKind::Reverse).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn multibyte_loop_name_on_bind_line() {
+        let src = "loop \"🎉\": kick << \"x x .\"\n";
+        let out = transform_src(src, 0, TransformKind::Reverse).unwrap();
+        assert_eq!(out, "loop \"🎉\": kick << \". x x\"\n");
+    }
+
+    #[test]
+    fn tokens_split_rest_after_semitone() {
+        assert_eq!(tokenize_pattern("x@3.x").unwrap(), vec!["x@3", ".", "x"]);
+    }
+
+    #[test]
+    fn tokens_keep_velocity_then_semitone() {
+        assert_eq!(
+            tokenize_pattern("x!0.5@3 . x").unwrap(),
+            vec!["x!0.5@3", ".", "x"]
+        );
+    }
+
+    #[test]
+    fn half_speed_keeps_semitone_rest_parseable() {
+        assert_eq!(
+            apply_kind("x@3.x", TransformKind::HalfSpeed).unwrap(),
+            "x@3 x@3 . . x x"
+        );
+    }
+
+    #[test]
+    fn rotate_right_direction() {
+        assert_eq!(
+            apply_kind("x x . .", TransformKind::RotateRight).unwrap(),
+            ". x x ."
+        );
+    }
+
+    #[test]
+    fn single_token_transforms() {
+        assert_eq!(apply_kind("x", TransformKind::RotateLeft).unwrap(), "x");
+        assert_eq!(apply_kind("x", TransformKind::RotateRight).unwrap(), "x");
+        assert_eq!(apply_kind("x", TransformKind::HalfSpeed).unwrap(), "x x");
+    }
+
+    #[test]
+    fn empty_pattern_rejected() {
+        assert_eq!(tokenize_pattern("").unwrap_err().kind, ErrorKind::Parse);
+        assert_eq!(tokenize_pattern("   ").unwrap_err().kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn transform_keeps_trailing_comment() {
+        let src = "loop \"b\":\n    kick << \"x x .\" -- keep me\n";
+        let out = transform_src(src, 1, TransformKind::Reverse).unwrap();
+        assert_eq!(out, "loop \"b\":\n    kick << \". x x\" -- keep me\n");
     }
 }
