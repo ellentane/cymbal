@@ -187,7 +187,7 @@ fn render_tracks_to_dir(
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     for (name, samples) in tracks {
-        let path = out_dir.join(format!("{}.wav", cymbal_core::wav::sanitize_name(&name)));
+        let path = free_path(out_dir, &cymbal_core::wav::sanitize_name(&name));
         cymbal_core::wav::write_wav(&path, &samples, SAMPLE_RATE)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
@@ -850,6 +850,32 @@ mod tests {
         assert!(out_dir.join("master.wav").exists());
         assert!(out_dir.join("b.wav").exists());
         assert!(out_dir.join("h.wav").exists());
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn render_tracks_dedupes_colliding_stems_and_keeps_master() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("cymbal_tracks2_src_{}.cym", std::process::id()));
+        let out_dir = dir.join(format!("cymbal_tracks2_out_{}", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&src_path).unwrap();
+            write!(
+                f,
+                "let kick = kick()\nloop \"master\":\n    kick << \"x\"\nloop \"a b\":\n    kick << \"x\"\nloop \"a-b\":\n    kick << \"x\"\n"
+            )
+            .unwrap();
+        }
+        render_tracks_to_dir(&src_path, &out_dir, 1).unwrap();
+        assert!(out_dir.join("master.wav").exists(), "mix keeps master.wav");
+        assert!(
+            out_dir.join("master-2.wav").exists(),
+            "loop named master must not overwrite the mix"
+        );
+        assert!(out_dir.join("a-b.wav").exists());
+        assert!(out_dir.join("a-b-2.wav").exists());
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_dir_all(&out_dir);
     }
