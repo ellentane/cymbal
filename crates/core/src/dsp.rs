@@ -8,15 +8,21 @@ fn noise(t: u64) -> f64 {
     (x.sin() * 43758.5453).rem_euclid(1.0) * 2.0 - 1.0
 }
 
+fn shifted_pitch(pitch: Option<u8>, semitone: i32) -> u8 {
+    ((pitch.unwrap_or(60) as i32 + semitone).clamp(0, 127)) as u8
+}
+
 pub struct Kick {
     t: u64,
     phase: f64,
     dur: u64,
+    semitone: i32,
     fx: VoiceFx,
 }
 pub struct Snare {
     t: u64,
     dur: u64,
+    semitone: i32,
     fx: VoiceFx,
 }
 pub struct Hat {
@@ -152,9 +158,15 @@ impl Voice {
                 t: 0,
                 phase: 0.0,
                 dur,
+                semitone: params.semitone,
                 fx,
             }),
-            VoiceKind::Snare => Voice::Snare(Snare { t: 0, dur, fx }),
+            VoiceKind::Snare => Voice::Snare(Snare {
+                t: 0,
+                dur,
+                semitone: params.semitone,
+                fx,
+            }),
             VoiceKind::Hat => Voice::Hat(Hat {
                 t: 0,
                 prev_noise: 0.0,
@@ -165,7 +177,7 @@ impl Voice {
                 t: 0,
                 phase: 0.0,
                 st: (0.0, 0.0, 0.0, 0.0),
-                freq: Transport::note_frequency(params.pitch.unwrap_or(60)),
+                freq: Transport::note_frequency(shifted_pitch(params.pitch, params.semitone)),
                 dur,
                 fx,
             }),
@@ -173,7 +185,7 @@ impl Voice {
                 t: 0,
                 phase: 0.0,
                 st: (0.0, 0.0, 0.0, 0.0),
-                freq: Transport::note_frequency(params.pitch.unwrap_or(60)),
+                freq: Transport::note_frequency(shifted_pitch(params.pitch, params.semitone)),
                 dur,
                 fx,
             }),
@@ -258,7 +270,8 @@ impl Kick {
         let t = self.t as f64;
         let ts = t / sr as f64;
         let sweep = (ts / 0.05).min(1.0);
-        let f = 120.0 * (45.0f64 / 120.0).powf(sweep);
+        let shift = 2f64.powf(self.semitone as f64 / 12.0);
+        let f = 120.0 * shift * (45.0f64 / 120.0).powf(sweep);
         self.phase += 2.0 * std::f64::consts::PI * f / sr as f64;
         let att = (ts / 0.0005).min(1.0);
         let body = self.phase.sin() * (-ts / 0.09).exp() * 1.4 * att;
@@ -276,7 +289,9 @@ impl Snare {
         let ts = self.t as f64 / sr as f64;
         let att = (ts / 0.0005).min(1.0);
         let noise_part = noise(self.t) * (-ts / 0.04).exp() * 0.6 * att;
-        let body = (2.0 * std::f64::consts::PI * 180.0 * ts).sin() * (-ts / 0.09).exp() * 0.4;
+        let shift = 2f64.powf(self.semitone as f64 / 12.0);
+        let body =
+            (2.0 * std::f64::consts::PI * 180.0 * shift * ts).sin() * (-ts / 0.09).exp() * 0.4;
         self.t += 1;
         Some(self.fx.apply((noise_part + body).tanh()))
     }
@@ -344,6 +359,16 @@ mod tests {
     fn render_all(kind: VoiceKind, pitch: Option<u8>) -> Vec<f32> {
         let dur = voice_default_duration(kind) as usize;
         let mut v = Voice::new(kind, VoiceParams::default_for(kind, pitch), 48000);
+        let mut out = Vec::with_capacity(dur);
+        while let Some(s) = v.next_sample(48000) {
+            out.push(s);
+        }
+        out
+    }
+
+    fn render_all_params(kind: VoiceKind, _pitch: Option<u8>, params: VoiceParams) -> Vec<f32> {
+        let dur = voice_default_duration(kind) as usize;
+        let mut v = Voice::new(kind, params, 48000);
         let mut out = Vec::with_capacity(dur);
         while let Some(s) = v.next_sample(48000) {
             out.push(s);
@@ -632,5 +657,35 @@ mod tests {
         // constant 1.0 -> env 1.0, over 0.5, gain exactly 0.5
         assert!(peak < 1.0, "compression must pull 1.0 down: {peak}");
         assert!(peak > 0.45, "and not squash it to silence: {peak}");
+    }
+
+    #[test]
+    fn synth_semitone_equals_pitch_shift() {
+        // bass @12 must be bit-identical to bass() at c5 (pitch 72, semitone 0)
+        let shifted = render_all_params(
+            VoiceKind::Bass,
+            Some(60),
+            VoiceParams {
+                semitone: 12,
+                ..VoiceParams::default_for(VoiceKind::Bass, Some(60))
+            },
+        );
+        let plain = render_all(VoiceKind::Bass, Some(72));
+        assert_eq!(shifted, plain, "bass@12 == bass c5");
+    }
+
+    #[test]
+    fn percussion_semitone_changes_body() {
+        let k0 = render_all(VoiceKind::Kick, None);
+        let k12 = render_all_params(
+            VoiceKind::Kick,
+            None,
+            VoiceParams {
+                semitone: 12,
+                ..VoiceParams::default_for(VoiceKind::Kick, None)
+            },
+        );
+        assert_ne!(k0, k12);
+        assert!(k12.iter().all(|s| s.is_finite()));
     }
 }

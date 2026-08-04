@@ -111,24 +111,13 @@ pub fn expand_string(s: &str) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
-pub fn bar_triggers(
-    pattern: &Expr,
-    default_pitch: u8,
-    sample_voice: bool,
-) -> Result<(usize, Vec<Option<Step>>)> {
+pub fn bar_triggers(pattern: &Expr, default_pitch: u8) -> Result<(usize, Vec<Option<Step>>)> {
     match pattern {
         Expr::PatternString(s, span) => {
             let hits = expand_string(s).map_err(|mut e| {
                 e.span = *span;
                 e
             })?;
-            if !sample_voice && hits.iter().any(|h| h.semitone != 0) {
-                return Err(Error::new(
-                    *span,
-                    ErrorKind::Eval,
-                    "semitone shift '@n' is only valid on sample voices",
-                ));
-            }
             Ok((
                 hits.len(),
                 hits.iter()
@@ -178,13 +167,6 @@ pub fn bar_triggers(
                 e.span = *span;
                 e
             })?;
-            if !sample_voice && hits.iter().any(|h| h.semitone != 0) {
-                return Err(Error::new(
-                    *span,
-                    ErrorKind::Eval,
-                    "semitone shift '@n' is only valid on sample voices",
-                ));
-            }
             let mut hit_index = 0;
             let steps = hits
                 .iter()
@@ -318,7 +300,6 @@ mod tests {
         let (steps, hits) = bar_triggers(
             &Expr::PatternString("x . x .".into(), Span { line: 1, col: 1 }),
             60,
-            false,
         )
         .unwrap();
         assert_eq!(steps, 4);
@@ -343,7 +324,6 @@ mod tests {
                 Span { line: 1, col: 1 },
             ),
             60,
-            false,
         )
         .unwrap();
         assert_eq!(steps, 2);
@@ -382,8 +362,7 @@ mod tests {
 
     #[test]
     fn empty_notes_rejected() {
-        let err =
-            bar_triggers(&Expr::Notes(vec![], Span { line: 1, col: 1 }), 60, false).unwrap_err();
+        let err = bar_triggers(&Expr::Notes(vec![], Span { line: 1, col: 1 }), 60).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
     }
 
@@ -405,7 +384,6 @@ mod tests {
                 Span { line: 1, col: 1 },
             ),
             60,
-            false,
         )
         .unwrap();
         assert_eq!(steps, 5);
@@ -488,47 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn sample_semitone_ok_but_synth_rejects() {
+    fn semitone_allowed_on_all_voices() {
         let (_, steps) = bar_triggers(
             &Expr::PatternString("x@2".into(), Span { line: 1, col: 1 }),
             60,
-            true,
-        )
-        .unwrap();
-        assert_eq!(
-            steps,
-            vec![Some(Step {
-                pitch: 60,
-                velocity: 1.0,
-                semitone: 2
-            })]
-        );
-        let err = bar_triggers(
-            &Expr::PatternString("x@2".into(), Span { line: 1, col: 1 }),
-            60,
-            false,
-        )
-        .unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Eval);
-    }
-
-    #[test]
-    fn tuple_guard_applies_semitone_rule() {
-        let note = Note {
-            midi: 60,
-            span: Span { line: 1, col: 1 },
-        };
-        let err = bar_triggers(
-            &Expr::Tuple(vec![note.clone()], "x@2".into(), Span { line: 1, col: 1 }),
-            60,
-            false,
-        )
-        .unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Eval);
-        let (_, steps) = bar_triggers(
-            &Expr::Tuple(vec![note], "x@2".into(), Span { line: 1, col: 1 }),
-            60,
-            true,
         )
         .unwrap();
         assert_eq!(
@@ -544,9 +485,9 @@ mod tests {
     #[test]
     fn modifier_errors_carry_pattern_span() {
         let span = Span { line: 7, col: 3 };
-        let err = bar_triggers(&Expr::PatternString("x!1.5".into(), span), 60, false).unwrap_err();
+        let err = bar_triggers(&Expr::PatternString("x!1.5".into(), span), 60).unwrap_err();
         assert_eq!(err.span, span);
-        let err = bar_triggers(&Expr::Tuple(vec![], "x!1.5".into(), span), 60, false).unwrap_err();
+        let err = bar_triggers(&Expr::Tuple(vec![], "x!1.5".into(), span), 60).unwrap_err();
         assert_eq!(err.span, span);
     }
 }

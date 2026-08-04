@@ -116,8 +116,8 @@ pub fn schedule(
         let bars = max_samples.div_ceil(bar);
 
         for bind in &loop_stmt.binds {
-            let (voice, is_sample, sample_data) = match &bind.voice {
-                Expr::Voice(voice, _) => (*voice, false, None),
+            let (voice, sample_data) = match &bind.voice {
+                Expr::Voice(voice, _) => (*voice, None),
                 Expr::Sample(path, span) => {
                     let data = samples.get(path).ok_or_else(|| {
                         Error::new(
@@ -126,7 +126,7 @@ pub fn schedule(
                             format!("sample '{path}' not loaded"),
                         )
                     })?;
-                    (VoiceKind::Sample, true, Some(data.clone()))
+                    (VoiceKind::Sample, Some(data.clone()))
                 }
                 _ => {
                     return Err(Error::new(
@@ -137,7 +137,7 @@ pub fn schedule(
                 }
             };
             let default_pitch = voice_default_pitch(voice).unwrap_or(60);
-            let (steps, step_list) = bar_triggers(&bind.pattern, default_pitch, is_sample)?;
+            let (steps, step_list) = bar_triggers(&bind.pattern, default_pitch)?;
             let step_samples = (bar / steps as u64).max(1);
 
             for bar_idx in 0..bars {
