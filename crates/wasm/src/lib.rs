@@ -106,4 +106,62 @@ mod tests {
             engine::eng_free(e);
         }
     }
+
+    #[wasm_bindgen_test]
+    fn eng_alloc_zero_bar_samples_does_not_hang() {
+        unsafe {
+            let e = engine::eng_alloc(0, 48000);
+            let mut out = vec![0.0f32; 128 * 2];
+            engine::eng_process(e, out.as_mut_ptr(), 128);
+            assert!(out.iter().all(|s| s.is_finite()));
+            engine::eng_free(e);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn engine_clamps_non_finite_wire_values() {
+        unsafe {
+            let e = engine::eng_alloc(24000, 48000);
+            let mut bytes = serialize_timeline(SRC, 1).unwrap();
+            bytes[16 + 13..16 + 17].copy_from_slice(&f32::NAN.to_le_bytes());
+            bytes[16 + 25..16 + 29].copy_from_slice(&f32::INFINITY.to_le_bytes());
+            engine::eng_submit(e, bytes.as_ptr(), bytes.len());
+            let mut out = vec![0.0f32; 128 * 2];
+            engine::eng_process(e, out.as_mut_ptr(), 128);
+            assert!(
+                out.iter().all(|s| s.is_finite()),
+                "NaN velocity/pan must be clamped"
+            );
+            engine::eng_free(e);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn eng_process_clamps_frames_to_scratch_size() {
+        unsafe {
+            let e = engine::eng_alloc(24000, 48000);
+            let bytes = serialize_timeline(SRC, 1).unwrap();
+            engine::eng_submit(e, bytes.as_ptr(), bytes.len());
+            let mut out = vec![f32::NAN; 256 * 2];
+            engine::eng_process(e, out.as_mut_ptr(), 256);
+            assert!(
+                out[256..512].iter().all(|s| s.is_nan()),
+                "frames beyond 128 must not be written"
+            );
+            engine::eng_free(e);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn deserialize_events_tolerates_short_input() {
+        assert!(engine::deserialize_events(&[]).is_empty());
+        assert!(engine::deserialize_events(&[0u8; 16]).is_empty());
+        assert!(engine::deserialize_events(&[0u8; 20]).is_empty());
+        let mut bytes = vec![0u8; 48];
+        bytes[8..16].copy_from_slice(&2u64.to_le_bytes());
+        assert_eq!(engine::deserialize_events(&bytes).len(), 1);
+        let mut bytes = vec![0u8; 16];
+        bytes[8..16].copy_from_slice(&1_000_000u64.to_le_bytes());
+        assert!(engine::deserialize_events(&bytes).is_empty());
+    }
 }

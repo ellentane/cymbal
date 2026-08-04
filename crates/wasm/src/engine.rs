@@ -29,9 +29,15 @@ pub fn serialize(tl: &Timeline) -> Vec<u8> {
 }
 
 pub fn deserialize_events(bytes: &[u8]) -> Vec<(u64, u8)> {
+    if bytes.len() < 16 {
+        return Vec::new();
+    }
     let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
+        if bytes.len() < 16 + i * 32 + 32 {
+            break;
+        }
         let rec = &bytes[16 + i * 32..16 + (i + 1) * 32];
         out.push((u64::from_le_bytes(rec[0..8].try_into().unwrap()), rec[8]));
     }
@@ -60,7 +66,7 @@ pub struct Eng {
 pub extern "C" fn eng_alloc(bar_samples: u64, sample_rate: u32) -> *mut Eng {
     Box::into_raw(Box::new(Eng {
         position: 0,
-        bar_samples,
+        bar_samples: bar_samples.max(1),
         next_bar: 0,
         future: Vec::new(),
         active: Vec::new(),
@@ -118,8 +124,10 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
         };
         let semitone = i16::from_le_bytes(rec[11..13].try_into().unwrap()) as i32;
         let velocity = f32::from_le_bytes(rec[13..17].try_into().unwrap());
+        let velocity = if velocity.is_finite() { velocity } else { 0.0 };
         let duration = u64::from_le_bytes(rec[17..25].try_into().unwrap());
         let pan = f32::from_le_bytes(rec[25..29].try_into().unwrap());
+        let pan = if pan.is_finite() { pan } else { 0.0 };
         eng.future.push((
             offset,
             Ev {
@@ -143,6 +151,10 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eng_process(e: *mut Eng, out: *mut f32, frames: u32) {
     let eng = unsafe { &mut *e };
+    if eng.bar_samples == 0 {
+        return;
+    }
+    let frames = frames.min(128);
     let out = unsafe { std::slice::from_raw_parts_mut(out, frames as usize * 2) };
     for frame in 0..frames as usize {
         let now = eng.position + frame as u64;
