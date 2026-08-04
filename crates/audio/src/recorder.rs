@@ -30,13 +30,11 @@ impl Recorder {
     }
 
     // audio thread: fill a block from the pool (allocates only if the writer
-    // is behind, which never happens in practice)
-    pub fn take_pool_block(&self) -> Option<Box<[f32]>> {
-        Some(
-            self.pool
-                .pop()
-                .unwrap_or_else(|| vec![0.0f32; self.block_frames * 2].into_boxed_slice()),
-        )
+    // is behind)
+    pub fn take_pool_block(&self) -> Box<[f32]> {
+        self.pool
+            .pop()
+            .unwrap_or_else(|| vec![0.0f32; self.block_frames * 2].into_boxed_slice())
     }
 
     // audio thread: hand a full block to the writer; dropped when full (gap)
@@ -70,7 +68,7 @@ mod tests {
     #[test]
     fn blocks_flow_through_ring() {
         let rec = Recorder::new(4, 4);
-        let mut b = rec.take_pool_block().unwrap();
+        let mut b = rec.take_pool_block();
         b[..8].copy_from_slice(&[0.0, 0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
         rec.push_filled(b);
         let out = rec.take_filled().unwrap();
@@ -80,13 +78,13 @@ mod tests {
     #[test]
     fn blocks_are_reused_from_pool() {
         let rec = Recorder::new(2, 2);
-        let b = rec.take_pool_block().unwrap();
+        let b = rec.take_pool_block();
         rec.push_filled(b);
-        let b2 = rec.take_pool_block().unwrap();
+        let b2 = rec.take_pool_block();
         rec.push_filled(b2);
         let got = rec.take_filled().unwrap();
         rec.return_block(got);
-        let b3 = rec.take_pool_block().unwrap();
+        let b3 = rec.take_pool_block();
         assert_eq!(b3.len(), 4, "returned block is reusable");
         rec.push_filled(b3);
         assert!(rec.take_filled().is_some());
@@ -95,9 +93,9 @@ mod tests {
     #[test]
     fn pool_exhaustion_drops_block() {
         let rec = Recorder::new(1, 2);
-        let b = rec.take_pool_block().unwrap();
+        let b = rec.take_pool_block();
         rec.push_filled(b);
-        let b2 = rec.take_pool_block().unwrap();
+        let b2 = rec.take_pool_block();
         rec.push_filled(b2);
         assert!(rec.take_filled().is_some(), "first block survives");
         assert!(
