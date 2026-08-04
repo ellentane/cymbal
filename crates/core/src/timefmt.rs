@@ -44,4 +44,10 @@ mod tests {
         let secs = 20669 * 86400 + 15 * 3600 + 32 * 60 + 45;
         assert_eq!(format_timestamp(secs), "20260804-153245");
     }
+
+    #[test]
+    fn negative_epoch_pre_1970() {
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(format_timestamp(-1), "19691231-235959");
+    }
 }

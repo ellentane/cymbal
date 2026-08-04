@@ -160,6 +160,22 @@ fn apply_tempo_override(src: &str, tempo: f64) -> String {
     lines.join("\n") + "\n"
 }
 
+fn recording_path(dir: &std::path::Path, ts: &str) -> std::path::PathBuf {
+    let mut n = 1;
+    loop {
+        let name = if n == 1 {
+            format!("recording-{ts}.wav")
+        } else {
+            format!("recording-{ts}-{n}.wav")
+        };
+        let path = dir.join(name);
+        if !path.exists() {
+            return path;
+        }
+        n += 1;
+    }
+}
+
 fn record_loop(
     rec: &Arc<cymbal_audio::recorder::Recorder>,
     path: &std::path::Path,
@@ -365,10 +381,15 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 let rec = cymbal_audio::recorder::Recorder::new(32, 4096);
                                 let rec_for_queue = rec.clone();
                                 let _ = queue.send(Msg::RecordStart(rec_for_queue));
-                                let path = file
-                                    .parent()
-                                    .map(|p| p.join("recording.wav"))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("recording.wav"));
+                                let ts = cymbal_core::timefmt::format_timestamp(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                );
+                                let dir =
+                                    file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                                let path = recording_path(&dir, &ts);
                                 let tx = msg_tx.clone();
                                 let start = Instant::now();
                                 record_writer = Some(std::thread::spawn(move || {
@@ -820,5 +841,32 @@ mod tests {
         let data = cymbal_core::wav::decode_wav(&bytes).unwrap();
         assert_eq!(data.frames.as_slice(), &[0.5, -0.5, 0.0, 0.0]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recording_path_is_timestamped_with_collision_suffix() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let base = dir.join(format!("cymbal_ts_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let ts = "20260804-153245".to_string();
+        let p1 = recording_path(&base, &ts);
+        assert_eq!(
+            p1.file_name().unwrap().to_str().unwrap(),
+            "recording-20260804-153245.wav"
+        );
+        std::fs::File::create(&p1).unwrap().write_all(b"x").unwrap();
+        let p2 = recording_path(&base, &ts);
+        assert_eq!(
+            p2.file_name().unwrap().to_str().unwrap(),
+            "recording-20260804-153245-2.wav"
+        );
+        std::fs::File::create(&p2).unwrap().write_all(b"x").unwrap();
+        let p3 = recording_path(&base, &ts);
+        assert_eq!(
+            p3.file_name().unwrap().to_str().unwrap(),
+            "recording-20260804-153245-3.wav"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
