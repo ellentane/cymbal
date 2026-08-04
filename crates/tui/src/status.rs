@@ -52,6 +52,7 @@ impl Status {
         let midi = self
             .midi_port
             .as_deref()
+            .filter(|p| !p.is_empty())
             .map(|p| format!("midi {p}"))
             .unwrap_or_else(|| "midi -".into());
         let msg = self.error.clone().unwrap_or_else(|| self.message.clone());
@@ -147,6 +148,13 @@ mod tests {
         let mut s = Status::new();
         s.midi_port = Some("UM-1".into());
         assert!(s.render().contains("midi UM-1"));
+    }
+
+    #[test]
+    fn render_shows_midi_dash_for_empty_port() {
+        let mut s = Status::new();
+        s.midi_port = Some(String::new());
+        assert!(s.render().contains("| midi - |"));
     }
 
     #[test]
