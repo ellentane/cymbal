@@ -12,15 +12,18 @@ pub struct Kick {
     t: u64,
     phase: f64,
     dur: u64,
+    fx: VoiceFx,
 }
 pub struct Snare {
     t: u64,
     dur: u64,
+    fx: VoiceFx,
 }
 pub struct Hat {
     t: u64,
     prev_noise: f64,
     dur: u64,
+    fx: VoiceFx,
 }
 pub struct Bass {
     t: u64,
@@ -28,6 +31,7 @@ pub struct Bass {
     st: (f64, f64, f64, f64),
     freq: f64,
     dur: u64,
+    fx: VoiceFx,
 }
 pub struct Lead {
     t: u64,
@@ -35,12 +39,85 @@ pub struct Lead {
     st: (f64, f64, f64, f64),
     freq: f64,
     dur: u64,
+    fx: VoiceFx,
 }
 pub struct Sample {
     data: Arc<SampleData>,
     pos: f64,
     rate: f64,
     t: u64,
+    fx: VoiceFx,
+}
+
+pub struct VoiceParams {
+    pub pitch: Option<u8>,
+    pub sample: Option<Arc<SampleData>>,
+    pub semitone: i32,
+    pub bass: f32,
+    pub treble: f32,
+    pub comp: f32,
+}
+
+impl VoiceParams {
+    pub fn default_for(kind: VoiceKind, pitch: Option<u8>) -> Self {
+        let _ = kind;
+        Self {
+            pitch,
+            sample: None,
+            semitone: 0,
+            bass: 0.0,
+            treble: 0.0,
+            comp: 0.0,
+        }
+    }
+
+    pub fn from_event(e: &crate::scheduler::Event) -> Self {
+        Self {
+            pitch: e.pitch,
+            sample: e.sample.clone(),
+            semitone: e.semitone,
+            bass: e.bass,
+            treble: e.treble,
+            comp: e.comp,
+        }
+    }
+}
+
+pub struct VoiceFx {
+    bass: f64,
+    treble: f64,
+    comp: f64,
+    lp: f64,
+    env: f64,
+}
+
+impl VoiceFx {
+    pub fn new(bass: f32, treble: f32, comp: f32) -> Self {
+        Self {
+            bass: 10f64.powf(12.0 * bass.clamp(0.0, 1.0) as f64 / 20.0),
+            treble: 10f64.powf(12.0 * treble.clamp(0.0, 1.0) as f64 / 20.0),
+            comp: comp.clamp(0.0, 1.0) as f64,
+            lp: 0.0,
+            env: 0.0,
+        }
+    }
+
+    fn apply(&mut self, x: f64, sr: u32) -> f32 {
+        let a = 1.0 - (-2.0 * std::f64::consts::PI * 200.0 / sr as f64).exp();
+        self.lp += a * (x - self.lp);
+        let lp = self.lp;
+        let bass_out = x + (self.bass - 1.0) * lp;
+        let out = bass_out + (self.treble - 1.0) * (bass_out - lp);
+        let peak = out.abs();
+        self.env = if peak > self.env {
+            peak
+        } else {
+            self.env * 0.9995
+        };
+        let over = (self.env - 0.5).max(0.0);
+        let gain = 1.0 - self.comp * (over / self.env.max(1e-9)).min(0.5);
+        (out * gain) as f32
+    }
 }
 
 pub enum Voice {
@@ -53,45 +130,46 @@ pub enum Voice {
 }
 
 impl Voice {
-    pub fn new(
-        kind: VoiceKind,
-        pitch: Option<u8>,
-        sample: Option<Arc<SampleData>>,
-        semitone: i32,
-    ) -> Self {
+    pub fn new(kind: VoiceKind, params: VoiceParams) -> Self {
         use crate::scheduler::voice_default_duration;
         let dur = voice_default_duration(kind);
+        let fx = VoiceFx::new(params.bass, params.treble, params.comp);
         match kind {
             VoiceKind::Kick => Voice::Kick(Kick {
                 t: 0,
                 phase: 0.0,
                 dur,
+                fx,
             }),
-            VoiceKind::Snare => Voice::Snare(Snare { t: 0, dur }),
+            VoiceKind::Snare => Voice::Snare(Snare { t: 0, dur, fx }),
             VoiceKind::Hat => Voice::Hat(Hat {
                 t: 0,
                 prev_noise: 0.0,
                 dur,
+                fx,
             }),
             VoiceKind::Bass => Voice::Bass(Bass {
                 t: 0,
                 phase: 0.0,
                 st: (0.0, 0.0, 0.0, 0.0),
-                freq: Transport::note_frequency(pitch.unwrap_or(60)),
+                freq: Transport::note_frequency(params.pitch.unwrap_or(60)),
                 dur,
+                fx,
             }),
             VoiceKind::Lead => Voice::Lead(Lead {
                 t: 0,
                 phase: 0.0,
                 st: (0.0, 0.0, 0.0, 0.0),
-                freq: Transport::note_frequency(pitch.unwrap_or(60)),
+                freq: Transport::note_frequency(params.pitch.unwrap_or(60)),
                 dur,
+                fx,
             }),
             VoiceKind::Sample => Voice::Sample(Sample {
-                data: sample.expect("sample voice requires sample data"),
+                data: params.sample.expect("sample voice requires sample data"),
                 pos: 0.0,
-                rate: 2f64.powf(semitone as f64 / 12.0),
+                rate: 2f64.powf(params.semitone as f64 / 12.0),
                 t: 0,
+                fx,
             }),
         }
     }
@@ -127,7 +205,7 @@ impl Sample {
         };
         self.pos += step;
         self.t += 1;
-        Some(out)
+        Some(self.fx.apply(out as f64, sr))
     }
 }
 
@@ -160,7 +238,7 @@ impl Kick {
         let body = self.phase.sin() * (-ts / 0.09).exp() * 1.4 * att;
         let click = 0.2 * (2.0 * std::f64::consts::PI * 8000.0 * ts).sin() * (-ts / 0.005).exp();
         self.t += 1;
-        Some((body + click).tanh() as f32)
+        Some(self.fx.apply((body + click).tanh(), sr))
     }
 }
 
@@ -174,7 +252,7 @@ impl Snare {
         let noise_part = noise(self.t) * (-ts / 0.04).exp() * 0.6 * att;
         let body = (2.0 * std::f64::consts::PI * 180.0 * ts).sin() * (-ts / 0.09).exp() * 0.4;
         self.t += 1;
-        Some((noise_part + body).tanh() as f32)
+        Some(self.fx.apply((noise_part + body).tanh(), sr))
     }
 }
 
@@ -190,7 +268,7 @@ impl Hat {
         self.prev_noise = n;
         let s = hp * 0.5 * (-ts / 0.015).exp() * att;
         self.t += 1;
-        Some(s.tanh() as f32)
+        Some(self.fx.apply(s.tanh(), sr))
     }
 }
 
@@ -209,7 +287,7 @@ impl Bass {
         };
         let filtered = lp(saw * env * 0.7, 500.0, 0.7, sr, &mut self.st);
         self.t += 1;
-        Some(filtered.tanh() as f32)
+        Some(self.fx.apply(filtered.tanh(), sr))
     }
 }
 
@@ -228,7 +306,7 @@ impl Lead {
         };
         let filtered = lp(saw * env * 0.6, 2500.0, 1.2, sr, &mut self.st);
         self.t += 1;
-        Some(filtered.tanh() as f32)
+        Some(self.fx.apply(filtered.tanh(), sr))
     }
 }
 
@@ -239,7 +317,7 @@ mod tests {
 
     fn render_all(kind: VoiceKind, pitch: Option<u8>) -> Vec<f32> {
         let dur = voice_default_duration(kind) as usize;
-        let mut v = Voice::new(kind, pitch, None, 0);
+        let mut v = Voice::new(kind, VoiceParams::default_for(kind, pitch));
         let mut out = Vec::with_capacity(dur);
         while let Some(s) = v.next_sample(48000) {
             out.push(s);
@@ -304,7 +382,10 @@ mod tests {
 
     #[test]
     fn voice_exhausts_and_returns_none() {
-        let mut v = Voice::new(VoiceKind::Hat, None, None, 0);
+        let mut v = Voice::new(
+            VoiceKind::Hat,
+            VoiceParams::default_for(VoiceKind::Hat, None),
+        );
         let mut n = 0;
         while v.next_sample(48000).is_some() {
             n += 1;
@@ -326,7 +407,14 @@ mod tests {
             frames: Arc::new(frames),
             sample_rate,
         };
-        Voice::new(VoiceKind::Sample, None, Some(Arc::new(data)), semitone)
+        Voice::new(
+            VoiceKind::Sample,
+            VoiceParams {
+                sample: Some(Arc::new(data)),
+                semitone,
+                ..VoiceParams::default_for(VoiceKind::Sample, None)
+            },
+        )
     }
 
     fn sample_voice(frames: Vec<f32>, semitone: i32) -> Voice {
@@ -397,5 +485,79 @@ mod tests {
         let mut v = sample_voice(vec![0.25], 0);
         assert_eq!(v.next_sample(48000).unwrap(), 0.25);
         assert!(v.next_sample(48000).is_none());
+    }
+
+    #[test]
+    fn voice_fx_bypass_is_bit_exact() {
+        for kind in [
+            VoiceKind::Kick,
+            VoiceKind::Snare,
+            VoiceKind::Hat,
+            VoiceKind::Bass,
+            VoiceKind::Lead,
+        ] {
+            let pitch = if matches!(kind, VoiceKind::Bass | VoiceKind::Lead) {
+                Some(60)
+            } else {
+                None
+            };
+            let mut plain = Voice::new(kind, VoiceParams::default_for(kind, pitch));
+            let mut fx = Voice::new(
+                kind,
+                VoiceParams {
+                    bass: 0.0,
+                    treble: 0.0,
+                    comp: 0.0,
+                    ..VoiceParams::default_for(kind, pitch)
+                },
+            );
+            loop {
+                let a = plain.next_sample(48000);
+                let b = fx.next_sample(48000);
+                assert_eq!(a, b, "zeroed fx must not change {kind:?}");
+                if a.is_none() {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bass_shelf_boosts_dc() {
+        let mut fx = VoiceFx::new(1.0, 0.0, 0.0);
+        let out = fx.apply(0.1, 48000);
+        let mut steady = fx.apply(0.1, 48000);
+        for _ in 0..2000 {
+            steady = fx.apply(0.1, 48000);
+        }
+        // bass=1.0 is a 12 dB shelf -> DC gain 10^(12/20) = 3.98x -> steady ~0.398
+        assert!(steady > 0.3, "low shelf must boost DC content");
+        assert!(steady < 0.45, "and settle at the shelf gain, not blow up");
+        assert!(out > 0.1);
+    }
+
+    #[test]
+    fn treble_shelf_boosts_fast_content_only() {
+        let mut fx = VoiceFx::new(0.0, 1.0, 0.0);
+        let mut steady = 0.0f32;
+        for _ in 0..2000 {
+            steady = fx.apply(0.1, 48000);
+        }
+        assert!(
+            (steady - 0.1).abs() < 1e-6,
+            "DC content unchanged by treble shelf"
+        );
+    }
+
+    #[test]
+    fn compressor_reduces_loud_signal() {
+        let mut fx = VoiceFx::new(0.0, 0.0, 1.0);
+        let mut peak = 0.0f32;
+        for _ in 0..48000 {
+            peak = peak.max(fx.apply(1.0, 48000));
+        }
+        // constant 1.0 -> env 1.0, over 0.5, gain exactly 0.5
+        assert!(peak < 1.0, "compression must pull 1.0 down: {peak}");
+        assert!(peak > 0.45, "and not squash it to silence: {peak}");
     }
 }

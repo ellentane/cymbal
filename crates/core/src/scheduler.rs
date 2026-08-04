@@ -45,6 +45,9 @@ pub struct Event {
     pub pan: f32,
     pub delay_send: f32,
     pub reverb_send: f32,
+    pub bass: f32,
+    pub treble: f32,
+    pub comp: f32,
     pub sample: Option<Arc<SampleData>>,
 }
 
@@ -173,6 +176,9 @@ pub fn schedule(
                         pan: bind.pan.unwrap_or(0.0),
                         delay_send: bind.delay_send.unwrap_or(0.0),
                         reverb_send: bind.reverb_send.unwrap_or(0.0),
+                        bass: 0.0,
+                        treble: 0.0,
+                        comp: 0.0,
                         sample: sample_data.clone(),
                     });
                 }
