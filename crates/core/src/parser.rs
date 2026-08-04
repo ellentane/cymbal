@@ -749,6 +749,11 @@ loop "beat" tempo=90:
                 "reverb",
                 Param::Const(0.0),
             ),
+            (
+                "loop \"a\":\n    sample \"k.wav\" << \"x\" cycle=0\n",
+                "cycle",
+                Param::Const(0.0),
+            ),
         ] {
             let program = parse(&lex(src).unwrap()).unwrap();
             let Stmt::Loop(l) = &program.statements[0] else {
@@ -759,6 +764,7 @@ loop "beat" tempo=90:
                 "pan" => l.binds[0].pan,
                 "vel" => l.binds[0].vel,
                 "reverb" => l.binds[0].reverb_send,
+                "cycle" => l.binds[0].cycle,
                 _ => unreachable!(),
             };
             assert_eq!(value, Some(expected), "source: {src}");

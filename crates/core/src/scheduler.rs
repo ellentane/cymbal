@@ -159,13 +159,14 @@ pub fn schedule(
                     }
                     let velocity = (step.velocity * resolve_param(&bind.vel, 1.0, step_idx, steps))
                         .clamp(0.0, 1.0);
+                    let cycle_on = tone_value(&bind.cycle) > 0.0;
                     let duration = match voice {
                         VoiceKind::Sample => {
                             let data = sample_data.as_ref().unwrap();
                             let rate = 2f64.powf(step.semitone as f64 / 12.0);
                             if let Some(Param::Const(d)) = bind.dur {
                                 (d as f64 * sample_rate as f64).round() as u64
-                            } else if bind.cycle.is_some() {
+                            } else if cycle_on {
                                 max_samples - offset
                             } else {
                                 let total = data.frames.len() as f64;
@@ -209,7 +210,7 @@ pub fn schedule(
                         sample: sample_data.clone(),
                         sample_start: resolve_param(&bind.start, 0.0, step_idx, steps) as f64,
                         sample_end: resolve_param(&bind.end, 1.0, step_idx, steps) as f64,
-                        sample_loop: bind.cycle.is_some(),
+                        sample_loop: cycle_on,
                     });
                 }
             }
@@ -863,6 +864,35 @@ mod tests {
         .unwrap();
         assert_eq!(tl.events[0].duration, 48000, "loops until the window end");
         assert!(tl.events[0].sample_loop);
+    }
+
+    #[test]
+    fn sample_cycle_value_gates_looping() {
+        let frames: Vec<f32> = vec![0.0; 48000];
+        let data = SampleData {
+            frames: Arc::new(frames),
+            sample_rate: 48000,
+        };
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), Arc::new(data));
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\" cycle=0 dur=0.2\n",
+            &HashMap::new(),
+            &samples,
+            96000,
+        )
+        .unwrap();
+        assert!(!tl.events[0].sample_loop, "cycle=0 disables looping");
+        assert_eq!(tl.events[0].duration, 9600, "0.2s at 48k");
+        let tl = src2timeline_v11(
+            "loop \"b\":\n    sample \"kick.wav\" << \"x\" cycle=1 dur=0.2\n",
+            &HashMap::new(),
+            &samples,
+            96000,
+        )
+        .unwrap();
+        assert!(tl.events[0].sample_loop, "cycle=1 enables looping");
+        assert_eq!(tl.events[0].duration, 9600, "dur still wins");
     }
 
     #[test]
