@@ -267,8 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn delay_taps_at_dotted_eighth() {
-        // 120 bpm, 48k: bar = 24000 samples, dotted-eighth = 18000
+    fn delay_taps_at_dotted_half() {
+        // 120 bpm, 48k: bar = 24000 samples, dotted-half (3-beat) tap = 18000
         let mut m = Master::new(48000, 24000);
         let mut taps = Vec::new();
         for i in 0..20000 {
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(
             taps.first().copied(),
             Some(18000),
-            "first echo at dotted-eighth"
+            "first echo at the dotted-half (3-beat) tap"
         );
     }
 
