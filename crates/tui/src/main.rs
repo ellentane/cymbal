@@ -37,6 +37,7 @@ const RENDER_DEFAULT_SECONDS: u64 = 120;
 enum UiMsg {
     Err(Error),
     Info(String),
+    RecordError(String),
     Reloaded {
         generations: HashMap<String, u64>,
         loops: Vec<String>,
@@ -65,7 +66,7 @@ fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
             status.clear_error();
             status.message = s;
         }
-        UiMsg::Reloaded { .. } => {}
+        _ => {}
     }
 }
 
@@ -168,7 +169,7 @@ fn record_loop(
     let mut w = match cymbal_core::wav::WavWriter::create(path, SAMPLE_RATE, 2) {
         Ok(w) => w,
         Err(e) => {
-            let _ = tx.send(UiMsg::Info(format!(
+            let _ = tx.send(UiMsg::RecordError(format!(
                 "cannot create {}: {e}",
                 path.display()
             )));
@@ -177,8 +178,9 @@ fn record_loop(
     };
     loop {
         if let Some(block) = rec.take_filled() {
-            if w.write_interleaved(&block).is_err() {
-                break;
+            if let Err(e) = w.write_interleaved(&block) {
+                let _ = tx.send(UiMsg::RecordError(format!("write failed: {e}")));
+                return;
             }
             rec.return_block(block);
         } else if rec.is_stopped() {
@@ -487,6 +489,13 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                         loops,
                         seq,
                     ),
+                    UiMsg::RecordError(s) => {
+                        recording = false;
+                        record_start = None;
+                        record_writer = None;
+                        status.recording = false;
+                        status.set_error(s);
+                    }
                     m => apply_ui_msg(&mut status, m),
                 }
             }
@@ -746,6 +755,24 @@ mod tests {
         assert_eq!(new.get("b"), Some(&2), "unchanged loop keeps generation");
         assert_eq!(new.get("h"), Some(&2));
         assert_eq!(new.get("k"), Some(&3), "new loop gets max+1");
+    }
+
+    #[test]
+    fn record_loop_reports_create_failure() {
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        let dir = std::env::temp_dir().join(format!("cymbal_nodir_{}", std::process::id()));
+        let path = dir.join("recording.wav");
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        let rec2 = rec.clone();
+        let path2 = path.clone();
+        std::thread::spawn(move || record_loop(&rec2, &path2, &tx, Instant::now()))
+            .join()
+            .unwrap();
+        let msg = rx.recv().unwrap();
+        let UiMsg::RecordError(s) = msg else {
+            panic!("expected RecordError");
+        };
+        assert!(s.contains("cannot create"), "{s}");
     }
 
     #[test]
