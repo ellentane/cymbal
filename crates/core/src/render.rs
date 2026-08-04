@@ -285,4 +285,21 @@ mod tests {
         assert_eq!(tracks.len(), 1, "only the master");
         assert!(tracks[0].1.iter().all(|s| *s == 0.0));
     }
+
+    #[test]
+    fn stems_are_filtered_per_loop() {
+        let src = "tempo 120\nlet kick = kick()\nlet hat = hat()\nloop \"k\":\n    kick << \"x\"\nloop \"h\":\n    hat << \"x . . . . . . x\"\n";
+        let tracks = render_offline_tracks(src, 96000, 48000, &HashMap::new()).unwrap();
+        let (_, k) = &tracks[1];
+        let (_, h) = &tracks[2];
+        // hat hits at frames 0 and 84000 (8 steps of 12000)
+        assert!(
+            h[84000 * 2..84000 * 2 + 16].iter().any(|s| s.abs() > 0.05),
+            "hat stem has its late hit"
+        );
+        assert!(
+            k[84000 * 2..84000 * 2 + 16].iter().all(|s| s.abs() < 1e-4),
+            "kick stem must not contain the hat's late hit"
+        );
+    }
 }
