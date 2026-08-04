@@ -380,7 +380,10 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
                                 record_start = Some(Instant::now());
                                 let rec = cymbal_audio::recorder::Recorder::new(32, 4096);
                                 let rec_for_queue = rec.clone();
-                                let _ = queue.send(Msg::RecordStart(rec_for_queue));
+                                let _ = queue.send(Msg::RecordStart {
+                                    master: rec_for_queue,
+                                    tracks: vec![],
+                                });
                                 let ts = cymbal_core::timefmt::format_timestamp(
                                     std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)

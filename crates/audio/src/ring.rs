@@ -7,7 +7,10 @@ use crate::recorder::Recorder;
 #[derive(Debug)]
 pub enum Msg {
     Swap(Arc<Timeline>, u64),
-    RecordStart(Arc<Recorder>),
+    RecordStart {
+        master: Arc<Recorder>,
+        tracks: Vec<(String, Arc<Recorder>)>,
+    },
     RecordStop,
     Shutdown,
 }
@@ -88,9 +91,13 @@ mod tests {
         use crate::recorder::Recorder;
         let q = AudioQueue::new(4);
         let rec = Recorder::new(2, 2);
-        q.send(Msg::RecordStart(rec)).unwrap();
+        q.send(Msg::RecordStart {
+            master: rec,
+            tracks: vec![],
+        })
+        .unwrap();
         q.send(Msg::RecordStop).unwrap();
-        assert!(matches!(q.try_recv(), Some(Msg::RecordStart(_))));
+        assert!(matches!(q.try_recv(), Some(Msg::RecordStart { .. })));
         assert!(matches!(q.try_recv(), Some(Msg::RecordStop)));
     }
 
@@ -104,7 +111,7 @@ mod tests {
         while let Some(m) = q.try_recv() {
             order.push(match m {
                 Msg::Swap(_, _) => "swap",
-                Msg::RecordStart(_) | Msg::RecordStop => "record",
+                Msg::RecordStart { .. } | Msg::RecordStop => "record",
                 Msg::Shutdown => "shutdown",
             });
         }

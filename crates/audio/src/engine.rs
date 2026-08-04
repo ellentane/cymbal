@@ -19,6 +19,12 @@ struct RecState {
     pos: usize,
 }
 
+struct TrackState {
+    rec: Arc<Recorder>,
+    current: Box<[f32]>,
+    pos: usize,
+}
+
 struct Active {
     until: u64,
     loop_name: String,
@@ -42,6 +48,8 @@ pub struct Engine {
     active: Vec<Active>,
     master: Master,
     rec_state: Option<RecState>,
+    tracks: Vec<(String, TrackState)>,
+    track_acc: Vec<(String, f32, f32)>,
 }
 
 impl Engine {
@@ -60,6 +68,8 @@ impl Engine {
             active: Vec::with_capacity(32),
             master: Master::new(sample_rate, bar_samples),
             rec_state: None,
+            tracks: Vec::new(),
+            track_acc: Vec::new(),
         }
     }
 
@@ -110,6 +120,15 @@ impl Engine {
                         delay_send: a.delay_send,
                         reverb_send: a.reverb_send,
                     });
+                    if let Some((_, l, r)) = self
+                        .track_acc
+                        .iter_mut()
+                        .find(|(n, _, _)| *n == a.loop_name)
+                    {
+                        let angle = (a.pan + 1.0) * std::f32::consts::PI / 4.0;
+                        *l += s * a.velocity * angle.cos();
+                        *r += s * a.velocity * angle.sin();
+                    }
                 }
             }
             let mut frame_out = [0.0f32; 2];
@@ -117,11 +136,27 @@ impl Engine {
             out[frame * 2] = frame_out[0];
             out[frame * 2 + 1] = frame_out[1];
             self.push_rec_frame(frame_out[0], frame_out[1]);
+            for (name, l, r) in &self.track_acc {
+                if let Some((_, st)) = self.tracks.iter_mut().find(|(n, _)| n == name) {
+                    st.current[st.pos * 2] = *l;
+                    st.current[st.pos * 2 + 1] = *r;
+                    st.pos += 1;
+                    if st.pos == st.rec.block_frames() {
+                        let full = std::mem::replace(&mut st.current, st.rec.take_pool_block());
+                        st.rec.push_filled(full);
+                        st.pos = 0;
+                    }
+                }
+            }
+            for (_, l, r) in &mut self.track_acc {
+                *l = 0.0;
+                *r = 0.0;
+            }
         }
         self.position += frames as u64;
     }
 
-    pub fn start_recording(&mut self, rec: Arc<Recorder>) {
+    pub fn start_recording(&mut self, rec: Arc<Recorder>, tracks: Vec<(String, Arc<Recorder>)>) {
         if self.rec_state.is_some() {
             self.stop_recording();
         }
@@ -130,6 +165,24 @@ impl Engine {
             current: rec.take_pool_block(),
             pos: 0,
         });
+        self.tracks = tracks
+            .into_iter()
+            .map(|(name, rec)| {
+                (
+                    name.clone(),
+                    TrackState {
+                        current: rec.take_pool_block(),
+                        rec,
+                        pos: 0,
+                    },
+                )
+            })
+            .collect();
+        self.track_acc = self
+            .tracks
+            .iter()
+            .map(|(n, _)| (n.clone(), 0.0, 0.0))
+            .collect();
     }
 
     pub fn stop_recording(&mut self) {
@@ -144,6 +197,26 @@ impl Engine {
             }
             state.rec.stop();
         }
+        let names: Vec<String> = self.tracks.iter().map(|(n, _)| n.clone()).collect();
+        for name in names {
+            self.flush_track(&name);
+        }
+        self.track_acc.clear();
+    }
+
+    fn flush_track(&mut self, name: &str) {
+        if let Some(idx) = self.tracks.iter().position(|(n, _)| n == name) {
+            let (_, mut st) = self.tracks.remove(idx);
+            let pos = st.pos;
+            if pos > 0 {
+                for s in &mut st.current[pos * 2..] {
+                    *s = 0.0;
+                }
+                st.rec.push_filled(st.current);
+            }
+            st.rec.stop();
+        }
+        self.track_acc.retain(|(n, _, _)| n != name);
     }
 
     fn push_rec_frame(&mut self, l: f32, r: f32) {
@@ -184,6 +257,20 @@ impl Engine {
                 });
             }
             self.future.sort_by_key(|s| s.at);
+            let mut i = 0;
+            while i < self.tracks.len() {
+                if tl.loops.contains(&self.tracks[i].0) {
+                    i += 1;
+                } else {
+                    let name = self.tracks[i].0.clone();
+                    self.flush_track(&name);
+                }
+            }
+            self.track_acc = self
+                .tracks
+                .iter()
+                .map(|(n, _)| (n.clone(), 0.0, 0.0))
+                .collect();
         }
     }
 }
@@ -556,7 +643,7 @@ mod tests {
             1,
         );
         let rec = Recorder::new(4, 4);
-        engine.start_recording(rec.clone());
+        engine.start_recording(rec.clone(), vec![]);
         engine_step(&mut engine, 4);
         engine.stop_recording();
         let blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec.take_filled()).collect();
@@ -581,7 +668,7 @@ mod tests {
             1,
         );
         let rec = Recorder::new(4, 4);
-        engine.start_recording(rec.clone());
+        engine.start_recording(rec.clone(), vec![]);
         engine_step(&mut engine, 3);
         engine.stop_recording();
         let b = rec.take_filled().unwrap();
@@ -606,7 +693,7 @@ mod tests {
             1,
         );
         let rec1 = Recorder::new(4, 4);
-        engine.start_recording(rec1.clone());
+        engine.start_recording(rec1.clone(), vec![]);
         engine_step(&mut engine, 3);
         engine.stop_recording();
         let b1 = rec1.take_filled().unwrap();
@@ -616,7 +703,7 @@ mod tests {
         );
         assert_eq!(&b1[6..], &[0.0, 0.0], "unfilled tail is zeroed");
         let rec2 = Recorder::new(4, 4);
-        engine.start_recording(rec2.clone());
+        engine.start_recording(rec2.clone(), vec![]);
         engine_step(&mut engine, 4);
         engine.stop_recording();
         let blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec2.take_filled()).collect();
@@ -642,10 +729,10 @@ mod tests {
             1,
         );
         let rec1 = Recorder::new(4, 4);
-        engine.start_recording(rec1.clone());
+        engine.start_recording(rec1.clone(), vec![]);
         engine_step(&mut engine, 3);
         let rec2 = Recorder::new(4, 4);
-        engine.start_recording(rec2.clone());
+        engine.start_recording(rec2.clone(), vec![]);
         assert!(
             rec1.is_stopped(),
             "restart must stop the previous recording"
@@ -681,7 +768,7 @@ mod tests {
             1,
         );
         let rec = Recorder::new(64, 4800);
-        engine.start_recording(rec.clone());
+        engine.start_recording(rec.clone(), vec![]);
         engine_step(&mut engine, 24000);
         engine.submit_swap(
             tl(
@@ -800,5 +887,105 @@ mod tests {
             out[0..16].iter().any(|s| *s != 0.0),
             "newer seq-2 swap applies at the next boundary"
         );
+    }
+
+    #[test]
+    fn tracks_record_only_their_own_loop() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(
+            tl(
+                vec![
+                    Event {
+                        sample_offset: 0,
+                        loop_name: "k".into(),
+                        voice: VoiceKind::Kick,
+                        pitch: None,
+                        semitone: 0,
+                        velocity: 1.0,
+                        duration: 14400,
+                        generation: 0,
+                        pan: -1.0,
+                        delay_send: 0.0,
+                        reverb_send: 0.0,
+                        sample: None,
+                        bass: 0.0,
+                        treble: 0.0,
+                        comp: 0.0,
+                        sample_start: 0.0,
+                        sample_end: 1.0,
+                        sample_loop: false,
+                    },
+                    Event {
+                        sample_offset: 0,
+                        loop_name: "h".into(),
+                        voice: VoiceKind::Hat,
+                        pitch: None,
+                        semitone: 0,
+                        velocity: 1.0,
+                        duration: 2400,
+                        generation: 0,
+                        pan: 1.0,
+                        delay_send: 0.0,
+                        reverb_send: 0.0,
+                        sample: None,
+                        bass: 0.0,
+                        treble: 0.0,
+                        comp: 0.0,
+                        sample_start: 0.0,
+                        sample_end: 1.0,
+                        sample_loop: false,
+                    },
+                ],
+                0,
+                vec![("k".into(), 0), ("h".into(), 0)],
+                24000,
+            ),
+            1,
+        );
+        let master = Recorder::new(4, 4);
+        let rec_k = Recorder::new(4, 4);
+        let rec_h = Recorder::new(4, 4);
+        engine.start_recording(
+            master.clone(),
+            vec![("k".into(), rec_k.clone()), ("h".into(), rec_h.clone())],
+        );
+        engine_step(&mut engine, 4);
+        engine.stop_recording();
+        let k_blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec_k.take_filled()).collect();
+        let h_blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec_h.take_filled()).collect();
+        assert_eq!(k_blocks.len(), 1);
+        assert_eq!(h_blocks.len(), 1);
+        assert!(
+            k_blocks[0][..8].iter().any(|s| *s != 0.0),
+            "kick track has audio"
+        );
+        // frame 1, not frame 0: every voice starts at exactly 0 (attack ramp)
+        let k_l = k_blocks[0][2];
+        let k_r = k_blocks[0][3];
+        assert!(k_l.abs() > k_r.abs() * 10.0, "kick pan=-1 tracks left");
+        let h_l = h_blocks[0][2];
+        let h_r = h_blocks[0][3];
+        assert!(h_r.abs() > h_l.abs() * 10.0, "hat pan=1 tracks right");
+    }
+
+    #[test]
+    fn removed_loop_track_is_flushed_on_swap() {
+        let mut engine = Engine::new(120.0, 48000);
+        let mut hat = ev(0, VoiceKind::Hat, 0, 2400);
+        hat.loop_name = "h".into();
+        engine.submit_swap(tl(vec![hat], 0, vec![("h".into(), 0)], 3), 1);
+        let rec_h = Recorder::new(4, 4);
+        engine.start_recording(Recorder::new(4, 4), vec![("h".into(), rec_h.clone())]);
+        engine_step(&mut engine, 3);
+        // swap drops loop "h"
+        engine.submit_swap(tl(vec![], 1, vec![], 3), 2);
+        engine_step(&mut engine, 4);
+        assert!(
+            rec_h.is_stopped(),
+            "removed loop's recorder must be stopped"
+        );
+        let b = rec_h.take_filled().unwrap();
+        assert!(b[..6].iter().any(|s| *s != 0.0), "partial track flushed");
+        assert_eq!(&b[6..], &[0.0, 0.0], "unfilled tail zeroed");
     }
 }
