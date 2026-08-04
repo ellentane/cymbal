@@ -6,6 +6,7 @@ use cymbal_core::mixer::{Master, VoiceOutput};
 use cymbal_core::scheduler::{Event, Timeline};
 use cymbal_core::transport::Transport;
 
+use crate::midi_out::{MidiItem, MidiOut};
 use crate::recorder::Recorder;
 
 struct Scheduled {
@@ -50,6 +51,9 @@ pub struct Engine {
     rec_state: Option<RecState>,
     tracks: Vec<(String, TrackState)>,
     track_acc: Vec<(String, f32, f32)>,
+    midi: Option<Arc<MidiOut>>,
+    midi_events: Vec<(u64, [u8; 3])>,
+    midi_cursor: usize,
 }
 
 impl Engine {
@@ -70,11 +74,18 @@ impl Engine {
             rec_state: None,
             tracks: Vec::new(),
             track_acc: Vec::new(),
+            midi: None,
+            midi_events: Vec::new(),
+            midi_cursor: 0,
         }
     }
 
     pub fn submit_swap(&mut self, timeline: Arc<Timeline>, seq: u64) {
         self.pending = Some((timeline, seq));
+    }
+
+    pub fn set_midi(&mut self, midi: Option<Arc<MidiOut>>) {
+        self.midi = midi;
     }
 
     pub fn process(&mut self, out: &mut [f32]) {
@@ -110,6 +121,15 @@ impl Engine {
                 }
             }
             self.active.retain(|a| a.until > now);
+            while self.midi_cursor < self.midi_events.len()
+                && self.midi_events[self.midi_cursor].0 <= now
+            {
+                let (offset, bytes) = self.midi_events[self.midi_cursor];
+                if let Some(m) = &self.midi {
+                    m.try_send(MidiItem::Note { offset, bytes });
+                }
+                self.midi_cursor += 1;
+            }
             self.master.begin_frame();
             for a in &mut self.active {
                 if let Some(s) = a.voice.next_sample(self.sample_rate) {
@@ -257,6 +277,20 @@ impl Engine {
                 });
             }
             self.future.sort_by_key(|s| s.at);
+            self.midi_events.clear();
+            self.midi_cursor = 0;
+            for ev in &tl.midi {
+                self.midi_events
+                    .push((self.timeline_origin + ev.sample_offset, ev.bytes));
+            }
+            if !tl.midi.is_empty()
+                && let Some(m) = &self.midi
+            {
+                m.try_send(MidiItem::Rebase {
+                    offset: now,
+                    tempo: tl.tempo,
+                });
+            }
             let mut i = 0;
             while i < self.tracks.len() {
                 if tl.loops.contains(&self.tracks[i].0) {
@@ -988,5 +1022,67 @@ mod tests {
         let b = rec_h.take_filled().unwrap();
         assert!(b[..6].iter().any(|s| *s != 0.0), "partial track flushed");
         assert_eq!(&b[6..], &[0.0, 0.0], "unfilled tail zeroed");
+    }
+
+    #[test]
+    fn midi_events_fire_at_offsets() {
+        use crate::midi_out::MidiOut;
+        let mut engine = Engine::new(120.0, 48000);
+        let midi = MidiOut::new(64);
+        engine.set_midi(Some(midi.clone()));
+        let mut tl = (*tl(
+            vec![ev(0, VoiceKind::Hat, 0, 2400)],
+            0,
+            vec![("b".into(), 0)],
+            24000,
+        ))
+        .clone();
+        tl.midi = vec![
+            cymbal_core::midi::MidiEvent {
+                sample_offset: 0,
+                bytes: [0x99, 42, 127],
+            },
+            cymbal_core::midi::MidiEvent {
+                sample_offset: 2400,
+                bytes: [0x80, 42, 0],
+            },
+        ];
+        engine.submit_swap(Arc::new(tl), 1);
+        engine_step(&mut engine, 4800);
+        let a = midi.take_note();
+        let b = midi.take_note();
+        assert_eq!(a, Some([0x99, 42, 127]));
+        assert_eq!(b, Some([0x80, 42, 0]));
+        assert!(midi.take_note().is_none());
+    }
+
+    #[test]
+    fn midi_rebases_on_swap() {
+        use crate::midi_out::MidiOut;
+        let mut engine = Engine::new(120.0, 48000);
+        let midi = MidiOut::new(64);
+        engine.set_midi(Some(midi.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 24000);
+        let mut tl2 = (*tl(
+            vec![ev(0, VoiceKind::Hat, 1, 2400)],
+            1,
+            vec![("b".into(), 1)],
+            24000,
+        ))
+        .clone();
+        tl2.midi = vec![cymbal_core::midi::MidiEvent {
+            sample_offset: 0,
+            bytes: [0x99, 42, 100],
+        }];
+        engine.submit_swap(Arc::new(tl2), 2);
+        let out = engine_step(&mut engine, 24000);
+        assert_eq!(
+            midi.take_rebase_offset(),
+            Some(24000),
+            "rebase at the boundary"
+        );
+        assert_eq!(midi.take_note(), Some([0x99, 42, 100]));
+        assert!(out.iter().all(|s| s.is_finite()));
     }
 }

@@ -383,14 +383,14 @@ fn run_tui(file: &std::path::Path) -> Result<(), String> {
     let mut latest_loops: HashMap<String, u64> = initial.loop_generations.iter().cloned().collect();
     let mut status = Status::new();
     status.loops = initial.loops.clone();
-    let handle = match cymbal_audio::stream::start_audio(queue.clone(), Arc::new(initial), |_e| {})
-    {
-        Ok(h) => Some(h),
-        Err(e) => {
-            status.set_error(e.into_error().to_string());
-            None
-        }
-    };
+    let handle =
+        match cymbal_audio::stream::start_audio(queue.clone(), Arc::new(initial), |_e| {}, None) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                status.set_error(e.into_error().to_string());
+                None
+            }
+        };
     status.latency_ms = handle.as_ref().and_then(|h| h.latency_ms);
     status.device_rate = handle.as_ref().map(|h| h.device_rate);
 
