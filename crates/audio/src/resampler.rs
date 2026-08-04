@@ -1,3 +1,6 @@
+// Every output position is (n0 + k) as f64 * step, one fp multiply, bit-identical
+// across block splits; do not "simplify" to n0 as f64 + k as f64 * step. The
+// invariant pushed = consumed + buffered makes frames_needed(n) - buffered_frames() exact.
 pub struct Resampler {
     step: f64,
     n0: u64,
@@ -138,5 +141,60 @@ mod tests {
         split.extend_from_slice(&o2);
         assert_eq!(split.len(), full.len());
         assert_eq!(split, full, "block splits must not change output");
+    }
+
+    #[test]
+    fn upsampled_output_is_identical_across_block_boundaries() {
+        let mut src = Vec::new();
+        for i in 0..48000 {
+            let l = (i % 97) as f32 / 97.0 + (i / 48000) as f32 * 0.25;
+            src.push(l);
+            src.push(-l);
+        }
+        // one block
+        let mut r = Resampler::new(96000);
+        r.push(&src);
+        let mut full = vec![0.0f32; 96000 * 2];
+        r.process(&mut full);
+        // two blocks, incremental pushes
+        let mut r2 = Resampler::new(96000);
+        let mut o1 = vec![0.0f32; 60000 * 2];
+        let n1 = r2.frames_needed(60000);
+        r2.push(&src[..n1 * 2]);
+        r2.process(&mut o1);
+        let stream_pos = n1;
+        let mut o2 = vec![0.0f32; 36000 * 2];
+        let n2 = r2.frames_needed(36000);
+        r2.push(&src[stream_pos * 2..(stream_pos + n2).min(src.len() / 2) * 2]);
+        r2.process(&mut o2);
+        let mut split = o1;
+        split.extend_from_slice(&o2);
+        assert_eq!(split.len(), full.len());
+        assert_eq!(split, full, "block splits must not change output");
+    }
+
+    #[test]
+    fn buffered_frames_stays_bounded_in_steady_state() {
+        for rate in [44100u32, 48000, 96000] {
+            let mut r = Resampler::new(rate);
+            let mut src_pos = 0usize;
+            let mut out = vec![0.0f32; 512 * 2];
+            let mut inbuf = Vec::new();
+            for block_i in 0..10_000 {
+                let needed = r.frames_needed(512) - r.buffered_frames();
+                inbuf.clear();
+                for i in 0..needed {
+                    let j = src_pos + i;
+                    let l = (j % 97) as f32 / 97.0 + (j / 48000) as f32 * 0.25;
+                    inbuf.push(l);
+                    inbuf.push(-l);
+                }
+                src_pos += needed;
+                r.push(&inbuf);
+                r.process(&mut out);
+                let b = r.buffered_frames();
+                assert!(b < 8, "rate {rate} block {block_i}: buffered {b} frames");
+            }
+        }
     }
 }
