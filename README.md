@@ -93,3 +93,12 @@ Three crates in one workspace:
 
 The core is platform-agnostic by design; a Web/Wasm frontend (AudioWorklet
 plus a SharedArrayBuffer bridge) is the planned phase 2.
+
+## Platforms
+
+- Linux (PipeWire/ALSA) — primary target
+- macOS (CoreAudio/CoreMIDI) — CI-tested
+- Windows (WASAPI/WinMM) — CI-tested
+
+Device sample rates other than 48 kHz are supported via resampling on the
+audio thread; recordings are always 48 kHz.
