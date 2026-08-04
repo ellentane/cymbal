@@ -13,13 +13,19 @@ pub struct Master {
     bar_samples: u64,
     dry_l: f32,
     dry_r: f32,
-    delay_bus: f32,
-    reverb_bus: f32,
-    delay: Vec<f32>,
-    delay_pos: usize,
+    delay_bus_l: f32,
+    delay_bus_r: f32,
+    reverb_bus_l: f32,
+    reverb_bus_r: f32,
+    delay_l: Vec<f32>,
+    delay_r: Vec<f32>,
+    delay_pos_l: usize,
+    delay_pos_r: usize,
     delay_feedback: f32,
-    comb: [Comb; 4],
-    allpass: [Allpass; 2],
+    comb_l: [Comb; 4],
+    comb_r: [Comb; 4],
+    allpass_l: [Allpass; 2],
+    allpass_r: [Allpass; 2],
     reverb_gain: f32,
 }
 
@@ -72,25 +78,35 @@ impl Allpass {
 
 impl Master {
     pub fn new(sample_rate: u32, bar_samples: u64) -> Self {
-        // slowest tempo 20 bpm -> bar 576000; delay tap 0.75 bar = 432000 + margin
         let max_bar = Transport::new(20.0, sample_rate).bar_samples();
         let delay_len = (0.75 * max_bar as f64) as usize + 1024;
         Self {
             bar_samples,
             dry_l: 0.0,
             dry_r: 0.0,
-            delay_bus: 0.0,
-            reverb_bus: 0.0,
-            delay: vec![0.0; delay_len],
-            delay_pos: 0,
+            delay_bus_l: 0.0,
+            delay_bus_r: 0.0,
+            reverb_bus_l: 0.0,
+            reverb_bus_r: 0.0,
+            delay_l: vec![0.0; delay_len],
+            delay_r: vec![0.0; delay_len],
+            delay_pos_l: 0,
+            delay_pos_r: 0,
             delay_feedback: 0.35,
-            comb: [
+            comb_l: [
                 Comb::new(1557, 0.8),
                 Comb::new(1617, 0.8),
                 Comb::new(1491, 0.8),
                 Comb::new(1422, 0.8),
             ],
-            allpass: [Allpass::new(225, 0.5), Allpass::new(556, 0.5)],
+            comb_r: [
+                Comb::new(1557, 0.8),
+                Comb::new(1617, 0.8),
+                Comb::new(1491, 0.8),
+                Comb::new(1422, 0.8),
+            ],
+            allpass_l: [Allpass::new(225, 0.5), Allpass::new(556, 0.5)],
+            allpass_r: [Allpass::new(225, 0.5), Allpass::new(556, 0.5)],
             reverb_gain: 0.06,
         }
     }
@@ -102,43 +118,61 @@ impl Master {
     pub fn begin_frame(&mut self) {
         self.dry_l = 0.0;
         self.dry_r = 0.0;
-        self.delay_bus = 0.0;
-        self.reverb_bus = 0.0;
+        self.delay_bus_l = 0.0;
+        self.delay_bus_r = 0.0;
+        self.reverb_bus_l = 0.0;
+        self.reverb_bus_r = 0.0;
     }
 
     pub fn add_voice(&mut self, v: VoiceOutput) {
         let s = v.sample * v.velocity;
         let angle = (v.pan + 1.0) * std::f32::consts::PI / 4.0;
-        self.dry_l += s * angle.cos();
-        self.dry_r += s * angle.sin();
-        self.delay_bus += s * v.delay_send;
-        self.reverb_bus += s * v.reverb_send;
+        let dl = angle.cos();
+        let dr = angle.sin();
+        self.dry_l += s * dl;
+        self.dry_r += s * dr;
+        self.delay_bus_l += s * v.delay_send * dl;
+        self.delay_bus_r += s * v.delay_send * dr;
+        self.reverb_bus_l += s * v.reverb_send * dl;
+        self.reverb_bus_r += s * v.reverb_send * dr;
     }
 
     pub fn end_frame(&mut self, out: &mut [f32; 2]) {
-        let delay_out = self.delay_tick(self.delay_bus);
-        let reverb_out = self.reverb_tick(self.reverb_bus);
-        out[0] = (self.dry_l + delay_out + reverb_out).tanh();
-        out[1] = (self.dry_r + delay_out + reverb_out).tanh();
+        let delay_out_l = self.delay_tick(self.delay_bus_l, true);
+        let delay_out_r = self.delay_tick(self.delay_bus_r, false);
+        let reverb_out_l = self.reverb_tick(self.reverb_bus_l, true);
+        let reverb_out_r = self.reverb_tick(self.reverb_bus_r, false);
+        out[0] = (self.dry_l + delay_out_l + reverb_out_l).tanh();
+        out[1] = (self.dry_r + delay_out_r + reverb_out_r).tanh();
     }
 
-    fn delay_tick(&mut self, input: f32) -> f32 {
-        let len = self.delay.len();
+    fn delay_tick(&mut self, input: f32, is_l: bool) -> f32 {
+        let len = self.delay_l.len();
         let tap = ((0.75 * self.bar_samples as f64) as usize).min(len);
-        let tap_pos = (self.delay_pos + len - tap) % len;
-        let out = self.delay[tap_pos];
-        self.delay[self.delay_pos] = input + out * self.delay_feedback;
-        self.delay_pos = (self.delay_pos + 1) % len;
+        let (buf, pos) = if is_l {
+            (&mut self.delay_l, &mut self.delay_pos_l)
+        } else {
+            (&mut self.delay_r, &mut self.delay_pos_r)
+        };
+        let tap_pos = (*pos + len - tap) % len;
+        let out = buf[tap_pos];
+        buf[*pos] = input + out * self.delay_feedback;
+        *pos = (*pos + 1) % len;
         out
     }
 
-    fn reverb_tick(&mut self, input: f32) -> f32 {
+    fn reverb_tick(&mut self, input: f32, is_l: bool) -> f32 {
+        let (combs, allpasses) = if is_l {
+            (&mut self.comb_l, &mut self.allpass_l)
+        } else {
+            (&mut self.comb_r, &mut self.allpass_r)
+        };
         let mut acc = 0.0;
-        for c in &mut self.comb {
+        for c in combs {
             acc += c.tick(input);
         }
-        let a1 = self.allpass[0].tick(acc);
-        let a2 = self.allpass[1].tick(a1);
+        let a1 = allpasses[0].tick(acc);
+        let a2 = allpasses[1].tick(a1);
         a2 * self.reverb_gain
     }
 }
@@ -346,6 +380,118 @@ mod tests {
         assert!(
             tail.iter().skip(40000).all(|s| s.abs() < 0.001),
             "reverb must decay below threshold"
+        );
+    }
+
+    #[test]
+    fn delay_echo_follows_source_pan() {
+        let mut m = Master::new(48000, 12000); // bar 12000 -> tap 9000
+        let mut taps_r = Vec::new();
+        let mut taps_l = Vec::new();
+        for i in 0..12000 {
+            let v = if i == 0 {
+                VoiceOutput {
+                    sample: 1.0,
+                    velocity: 1.0,
+                    pan: -1.0,
+                    delay_send: 1.0,
+                    reverb_send: 0.0,
+                }
+            } else {
+                VoiceOutput {
+                    sample: 0.0,
+                    velocity: 1.0,
+                    pan: -1.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                }
+            };
+            let out = frame(&mut m, &[v]);
+            if i > 0 && out[0].abs() > 0.05 {
+                taps_l.push(i);
+            }
+            if i > 0 && out[1].abs() > 0.05 {
+                taps_r.push(i);
+            }
+        }
+        assert_eq!(
+            taps_l.first().copied(),
+            Some(9000),
+            "echo on the left at 0.75 bar"
+        );
+        assert!(taps_r.is_empty(), "hard-left echo must not reach the right");
+    }
+
+    #[test]
+    fn reverb_tail_follows_source_pan() {
+        let mut m = Master::new(48000, 24000);
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        for i in 0..48000 {
+            let v = if i == 0 {
+                VoiceOutput {
+                    sample: 1.0,
+                    velocity: 1.0,
+                    pan: 1.0,
+                    delay_send: 0.0,
+                    reverb_send: 1.0,
+                }
+            } else {
+                VoiceOutput {
+                    sample: 0.0,
+                    velocity: 1.0,
+                    pan: 1.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                }
+            };
+            let out = frame(&mut m, &[v]);
+            peak_l = peak_l.max(out[0].abs());
+            peak_r = peak_r.max(out[1].abs());
+        }
+        assert!(peak_r > 0.001, "tail must be audible on the right");
+        assert!(peak_l < 0.001, "hard-right reverb must not leak left");
+    }
+
+    #[test]
+    fn center_pan_sends_split_equally() {
+        let mut m = Master::new(48000, 24000);
+        let v = VoiceOutput {
+            sample: 1.0,
+            velocity: 1.0,
+            pan: 0.0,
+            delay_send: 1.0,
+            reverb_send: 0.0,
+        };
+        let mut first = 0usize;
+        let mut at_echo = [0.0f32; 2];
+        for i in 0..20000 {
+            let out = frame(
+                &mut m,
+                &[if i == 0 {
+                    v
+                } else {
+                    VoiceOutput {
+                        sample: 0.0,
+                        velocity: 1.0,
+                        pan: 0.0,
+                        delay_send: 0.0,
+                        reverb_send: 0.0,
+                    }
+                }],
+            );
+            if i > 0 && out[0].abs() > 0.05 && first == 0 {
+                first = i;
+            }
+            if i == 18000 {
+                at_echo = out;
+            }
+        }
+        assert_eq!(first, 18000, "center echo at dotted-half tap");
+        assert!(at_echo[0].abs() > 0.05);
+        assert!(
+            (at_echo[0] - at_echo[1]).abs() < 1e-6,
+            "center stays center in FX"
         );
     }
 }
