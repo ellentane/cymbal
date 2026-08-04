@@ -372,6 +372,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn write_wav_rejects_odd_stereo_sample_count() {
         let path = std::env::temp_dir().join(format!("cymbal_test_odd_{}.wav", std::process::id()));
         assert!(write_wav(&path, &[0.0, 0.5, -0.5], 48000).is_err());
@@ -380,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn wav_writer_round_trips() {
         let path = std::env::temp_dir().join(format!("cymbal_ww_{}.wav", std::process::id()));
         let mut w = WavWriter::create(&path, 48000, 1).unwrap();
@@ -398,6 +400,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn wav_writer_patches_header_sizes() {
         let path = std::env::temp_dir().join(format!("cymbal_ww2_{}.wav", std::process::id()));
         let mut w = WavWriter::create(&path, 48000, 2).unwrap();
@@ -413,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn wav_writer_len_check_rejects_overflow() {
         assert!(check_len_fits(0, 0));
         assert!(check_len_fits(u32::MAX, 0));
@@ -435,6 +439,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn f32_writer_patches_header() {
         let path = std::env::temp_dir().join(format!("cymbal_f32_{}.wav", std::process::id()));
         let mut w = WavWriter::create_with_format(&path, 48000, 2, WavFormat::F32).unwrap();
