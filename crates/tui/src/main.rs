@@ -134,10 +134,11 @@ fn render_src(src: &str, base_dir: &std::path::Path, max_samples: u64) -> Result
     cymbal_core::render::render_offline(src, max_samples, SAMPLE_RATE, &samples)
 }
 
-fn render_to_wav(
+fn render_to_wav_with(
     input: &std::path::Path,
     output: &std::path::Path,
     seconds: u64,
+    format: cymbal_core::wav::WavFormat,
 ) -> Result<(), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
@@ -145,8 +146,28 @@ fn render_to_wav(
     let base = input.parent().unwrap_or_else(|| std::path::Path::new("."));
     let samples_out =
         render_src(&src, base, max_samples).map_err(|e| format!("render failed: {e}"))?;
-    cymbal_core::wav::write_wav(output, &samples_out, SAMPLE_RATE)
-        .map_err(|e| format!("cannot write {}: {e}", output.display()))
+    let mut w = cymbal_core::wav::WavWriter::create_with_format(output, SAMPLE_RATE, 2, format)
+        .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+    w.write_interleaved(&samples_out)
+        .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+    w.finalize()
+        .map_err(|e| format!("cannot finalize {}: {e}", output.display()))
+}
+
+fn render_to_wav(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    seconds: u64,
+) -> Result<(), String> {
+    render_to_wav_with(input, output, seconds, cymbal_core::wav::WavFormat::Pcm16)
+}
+
+fn render_to_wav_f32(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    seconds: u64,
+) -> Result<(), String> {
+    render_to_wav_with(input, output, seconds, cymbal_core::wav::WavFormat::F32)
 }
 
 fn apply_tempo_override(src: &str, tempo: f64) -> String {
@@ -275,6 +296,38 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
+        ["render", "--f32", input, output] => {
+            match render_to_wav_f32(
+                std::path::Path::new(input),
+                std::path::Path::new(output),
+                RENDER_DEFAULT_SECONDS,
+            ) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        ["render", "--f32", input, output, seconds] => match seconds.parse::<u64>() {
+            Ok(s) if s > 0 => {
+                match render_to_wav_f32(
+                    std::path::Path::new(input),
+                    std::path::Path::new(output),
+                    s,
+                ) {
+                    Ok(()) => std::process::ExitCode::SUCCESS,
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        std::process::ExitCode::FAILURE
+                    }
+                }
+            }
+            _ => {
+                eprintln!("invalid seconds: {seconds}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         ["render", input, output] => {
             match render_to_wav(
                 std::path::Path::new(input),
@@ -312,7 +365,7 @@ fn main() -> std::process::ExitCode {
         },
         _ => {
             eprintln!(
-                "usage: cymbal <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]"
+                "usage: cymbal <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]"
             );
             std::process::ExitCode::from(2)
         }
@@ -678,6 +731,23 @@ mod tests {
         }
         render_to_wav(&src_path, &out_path, 1).unwrap();
         assert_eq!(std::fs::metadata(&out_path).unwrap().len(), 48000 * 4 + 44);
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn render_f32_writes_float_wav() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("cymbal_f32_src_{}.cym", std::process::id()));
+        let out_path = dir.join(format!("cymbal_f32_out_{}.wav", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&src_path).unwrap();
+            write!(f, "let kick = kick()\nloop \"b\":\n    kick << \"x\"\n").unwrap();
+        }
+        render_to_wav_f32(&src_path, &out_path, 1).unwrap();
+        let bytes = std::fs::read(&out_path).unwrap();
+        assert_eq!(&bytes[20..22], &3u16.to_le_bytes(), "fmt tag 3");
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
     }
