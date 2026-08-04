@@ -321,12 +321,16 @@ mod tests {
         assert_ne!(y1, y2, "lowpass state must persist between samples");
     }
 
-    fn sample_voice(frames: Vec<f32>, semitone: i32) -> Voice {
+    fn sample_voice_at(frames: Vec<f32>, semitone: i32, sample_rate: u32) -> Voice {
         let data = SampleData {
             frames: Arc::new(frames),
-            sample_rate: 48000,
+            sample_rate,
         };
         Voice::new(VoiceKind::Sample, None, Some(Arc::new(data)), semitone)
+    }
+
+    fn sample_voice(frames: Vec<f32>, semitone: i32) -> Voice {
+        sample_voice_at(frames, semitone, 48000)
     }
 
     #[test]
@@ -362,10 +366,36 @@ mod tests {
     #[test]
     fn sample_interpolates_linearly() {
         let frames = vec![0.0, 1.0];
-        let mut v = sample_voice(frames, 0);
+        let mut v = sample_voice(frames, -12);
         let s0 = v.next_sample(48000).unwrap();
         let s1 = v.next_sample(48000).unwrap();
+        let s2 = v.next_sample(48000).unwrap();
         assert_eq!(s0, 0.0);
-        assert_eq!(s1, 1.0);
+        assert_eq!(s1, 0.5);
+        assert_eq!(s2, 1.0);
+    }
+
+    #[test]
+    fn sample_plays_at_file_rate() {
+        let frames = vec![0.0; 48000];
+        let mut v = sample_voice_at(frames, 0, 24000);
+        let mut n = 0;
+        while v.next_sample(48000).is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 24000, "sr_ratio 2 plays half the frames");
+    }
+
+    #[test]
+    fn sample_empty_frames_is_silent() {
+        let mut v = sample_voice(vec![], 0);
+        assert!(v.next_sample(48000).is_none());
+    }
+
+    #[test]
+    fn sample_single_frame_plays_once() {
+        let mut v = sample_voice(vec![0.25], 0);
+        assert_eq!(v.next_sample(48000).unwrap(), 0.25);
+        assert!(v.next_sample(48000).is_none());
     }
 }
