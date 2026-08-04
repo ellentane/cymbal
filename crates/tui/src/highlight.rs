@@ -15,6 +15,7 @@ pub fn classify(kind: &TokenKind) -> Class {
         TokenKind::Let | TokenKind::Loop | TokenKind::Tempo | TokenKind::Rev | TokenKind::Every => {
             Class::Keyword
         }
+        TokenKind::Ident(s) if s == "sample" => Class::Keyword,
         TokenKind::String(_) => Class::Pattern,
         TokenKind::Note(_) => Class::Note,
         TokenKind::Number(_) => Class::Number,
@@ -90,6 +91,12 @@ mod tests {
         assert_eq!(classify(&TokenKind::Number(120.0)), Class::Number);
         assert_eq!(classify(&TokenKind::Ident("kick".into())), Class::Plain);
         assert_eq!(classify(&TokenKind::Comma), Class::Plain);
+    }
+
+    #[test]
+    fn sample_is_keyword() {
+        let classes = highlight_line("sample \"kick.wav\" << \"x\"");
+        assert!(classes.iter().any(|(_, c)| *c == Class::Keyword));
     }
 
     #[test]

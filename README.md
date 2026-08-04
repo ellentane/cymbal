@@ -27,15 +27,19 @@ tempo 120
 let kick = kick()
 let bass = bass()
 let lead = lead()
+let perc = sample "drums.wav"
 
 loop "beat":
-    kick  << "x . . x . . x ."
-    bass  << ([c2, f2, g2], "x . . x . . . .")
-    lead  << [c4, d4, e4, g4] >> every(4, rev)
+    kick  << "x . . x . . x ." vel=0.9
+    bass  << ([c2, f2, g2], "x . . x . . . .") pan=-0.4
+    lead  << [c4, d4, e4, g4] >> every(4, rev) delay=0.4
+    perc  << "x . x!0.5 x@2 . x ." reverb=0.4
 ```
 
 - `tempo <n>` sets the transport tempo (default 120).
 - `let <name> = kick() | snare() | hat() | bass() | lead()` defines a voice.
+- `let <name> = sample "file.wav"` defines a sample voice from a WAV file;
+  paths are relative to the `.cym` file.
 - `loop "<name>":` opens an infinitely repeating loop block; its body binds
   patterns to voices with `<<`.
 - A pattern string's length is the subdivision: `"x . . x . . x ."` (8 chars)
@@ -46,15 +50,30 @@ loop "beat":
 - `([c2, f2, g2], "x . . x . . . .")` pairs pitches with a custom rhythm.
 - `>> rev` reverses a pattern's steps; `>> every(n, rev)` reverses every nth
   cycle.
+- After the pattern (and any `>>` combinators), a bind takes mix parameters:
+  `pan=-0.4` (-1 left .. 1 right), `vel=0.9` (scales hit velocity),
+  `delay=0.25` (delay send), `reverb=0.4` (reverb send). `vel`, `delay`, and
+  `reverb` accept 0..=1.
+- Inside a pattern string, `x!0.5` sets a per-hit velocity (0..=1) and `x@2`
+  transposes a hit by 2 semitones. `@n` is only valid on sample voices.
 
 ## Keybindings
 
 | Key | Action |
 |---|---|
-| Ctrl-S | reload the file (swap takes effect at the next bar) |
-| Ctrl-= / Ctrl-- | raise / lower tempo |
+| Ctrl-S | reload the file — only changed loops rebuild, notes already sounding on unchanged loops keep playing |
+| Ctrl-= / Ctrl-- | raise / lower tempo; forces a full reload of every loop |
+| Ctrl-R | toggle recording — writes `recording.wav` next to the file, shows `REC mm:ss` in the status bar |
 | Ctrl-E | export the current song to `out.wav` next to the file |
 | Ctrl-Q | quit |
+
+## Live reload
+
+Reloads are per-loop: on Ctrl-S each loop gets a generation id and only the
+loops whose contents changed are rebuilt and swapped into the running schedule.
+Notes already sounding on unchanged loops play out uninterrupted, so you can
+audition edits without cutting a drum fill. Changing tempo (Ctrl-= / Ctrl--)
+marks every loop dirty and rebuilds all of them.
 
 ## Architecture
 

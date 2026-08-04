@@ -1,4 +1,4 @@
--- groove.cym — syncopated two-loop groove
+-- groove.cym — syncopated three-loop groove
 tempo 116
 
 let kick = kick()
@@ -8,12 +8,12 @@ let bass = bass()
 let lead = lead()
 
 loop "drums":
-    kick  << "x . . x . x . ."
-    snare << "x . x . x . x ."
-    hat   << "x . x x . x x x"
+    kick  << "x . . x . x . ." vel=0.9
+    snare << "x . x . x . x ." reverb=0.4
+    hat   << "x . x x . x x x" pan=0.5 delay=0.25
 
 loop "low":
-    bass << ([c2, c2, f2, g2], "x . . . . . . .")
+    bass << ([c2, c2, f2, g2], "x . . . . . . .") pan=-0.4
 
 loop "air":
-    lead << [c5, bb4, g4, f4] >> every(3, rev)
+    lead << [c5, bb4, g4, f4] >> every(3, rev) delay=0.4
