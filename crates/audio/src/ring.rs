@@ -2,9 +2,13 @@ use std::sync::Arc;
 
 use cymbal_core::scheduler::Timeline;
 
+use crate::recorder::Recorder;
+
 #[derive(Debug)]
 pub enum Msg {
     Swap(Arc<Timeline>),
+    RecordStart(Arc<Recorder>),
+    RecordStop,
     Shutdown,
 }
 
@@ -80,6 +84,17 @@ mod tests {
     }
 
     #[test]
+    fn record_messages_are_delivered() {
+        use crate::recorder::Recorder;
+        let q = AudioQueue::new(4);
+        let rec = Recorder::new(2, 2);
+        q.send(Msg::RecordStart(rec)).unwrap();
+        q.send(Msg::RecordStop).unwrap();
+        assert!(matches!(q.try_recv(), Some(Msg::RecordStart(_))));
+        assert!(matches!(q.try_recv(), Some(Msg::RecordStop)));
+    }
+
+    #[test]
     fn shutdown_is_delivered_in_order() {
         let q = AudioQueue::new(4);
         q.send(Msg::Swap(tl(1))).unwrap();
@@ -89,6 +104,7 @@ mod tests {
         while let Some(m) = q.try_recv() {
             order.push(match m {
                 Msg::Swap(_) => "swap",
+                Msg::RecordStart(_) | Msg::RecordStop => "record",
                 Msg::Shutdown => "shutdown",
             });
         }

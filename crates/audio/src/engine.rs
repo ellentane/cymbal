@@ -6,9 +6,17 @@ use cymbal_core::mixer::{Master, VoiceOutput};
 use cymbal_core::scheduler::{Event, Timeline};
 use cymbal_core::transport::Transport;
 
+use crate::recorder::Recorder;
+
 struct Scheduled {
     at: u64,
     event: Event,
+}
+
+struct RecState {
+    rec: Arc<Recorder>,
+    current: Box<[f32]>,
+    pos: usize,
 }
 
 struct Active {
@@ -34,6 +42,7 @@ pub struct Engine {
     future: Vec<Scheduled>,
     active: Vec<Active>,
     master: Master,
+    rec_state: Option<RecState>,
 }
 
 impl Engine {
@@ -52,6 +61,7 @@ impl Engine {
             future: Vec::with_capacity(256),
             active: Vec::with_capacity(32),
             master: Master::new(sample_rate, bar_samples),
+            rec_state: None,
         }
     }
 
@@ -63,9 +73,8 @@ impl Engine {
         let frames = out.len() / 2;
         for frame in 0..frames {
             let now = self.position + frame as u64;
-            // while, not if: a large cpal buffer can span several bar
-            // boundaries (e.g. 50ms buffer at 300 bpm); every missed
-            // boundary must be processed.
+            // while, not if: keeps the boundary invariant for any buffer/frame
+            // alignment; a pending swap applies at the first boundary reached.
             while now >= self.next_bar_abs {
                 self.apply_swap_at_boundary(now);
                 self.next_bar_abs += self.bar_samples;
@@ -105,8 +114,51 @@ impl Engine {
             self.master.end_frame(&mut frame_out);
             out[frame * 2] = frame_out[0];
             out[frame * 2 + 1] = frame_out[1];
+            self.push_rec_frame(frame_out[0], frame_out[1]);
         }
         self.position += frames as u64;
+    }
+
+    pub fn start_recording(&mut self, rec: Arc<Recorder>) {
+        let block_frames = rec.block_frames();
+        self.rec_state = Some(RecState {
+            rec,
+            current: vec![0.0f32; block_frames * 2].into_boxed_slice(),
+            pos: 0,
+        });
+    }
+
+    pub fn stop_recording(&mut self) {
+        if let Some(state) = self.rec_state.take() {
+            let pos = state.pos;
+            if pos > 0 {
+                let mut cur = state.current;
+                for s in &mut cur[pos * 2..] {
+                    *s = 0.0;
+                }
+                state.rec.push_filled(cur);
+            }
+            state.rec.stop();
+        }
+    }
+
+    fn push_rec_frame(&mut self, l: f32, r: f32) {
+        let Some(state) = &mut self.rec_state else {
+            return;
+        };
+        state.current[state.pos * 2] = l;
+        state.current[state.pos * 2 + 1] = r;
+        state.pos += 1;
+        if state.pos == state.rec.block_frames() {
+            let full = std::mem::replace(
+                &mut state.current,
+                state.rec.take_pool_block().unwrap_or_else(|| {
+                    vec![0.0f32; state.rec.block_frames() * 2].into_boxed_slice()
+                }),
+            );
+            state.rec.push_filled(full);
+            state.pos = 0;
+        }
     }
 
     fn apply_swap_at_boundary(&mut self, now: u64) {
@@ -285,7 +337,7 @@ mod tests {
         );
         assert!(
             out[4800 * 2..4800 * 2 + 8].iter().any(|s| *s != 0.0),
-            "bass still ringing at frame 4800 (t=48000)"
+            "bass still ringing at frame 4800 (t=28800)"
         );
     }
 
@@ -425,6 +477,50 @@ mod tests {
             "kick at origin + 12000 (new bar_samples)"
         );
         assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn recording_taps_post_master_stereo() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(
+            vec![ev(0, VoiceKind::Hat, 0, 2400)],
+            0,
+            vec![("b".into(), 0)],
+            24000,
+        ));
+        let rec = Recorder::new(4, 4);
+        engine.start_recording(rec.clone());
+        engine_step(&mut engine, 4);
+        engine.stop_recording();
+        let blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec.take_filled()).collect();
+        assert_eq!(blocks.len(), 1, "4 frames = one full block");
+        assert!(
+            blocks[0][..8].iter().any(|s| *s != 0.0),
+            "captured post-master signal"
+        );
+        assert!(rec.is_stopped());
+    }
+
+    #[test]
+    fn record_stop_flushes_partial_block() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(
+            vec![ev(0, VoiceKind::Hat, 0, 2400)],
+            0,
+            vec![("b".into(), 0)],
+            24000,
+        ));
+        let rec = Recorder::new(4, 4);
+        engine.start_recording(rec.clone());
+        engine_step(&mut engine, 3);
+        engine.stop_recording();
+        let b = rec.take_filled().unwrap();
+        assert!(
+            b[..6].iter().any(|s| *s != 0.0),
+            "partial block contains audio"
+        );
+        assert_eq!(&b[6..], &[0.0, 0.0], "unfilled tail is zeroed");
+        assert!(rec.take_filled().is_none());
     }
 
     #[test]

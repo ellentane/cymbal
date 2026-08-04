@@ -73,6 +73,8 @@ pub fn start_audio(
                 while let Some(msg) = queue.try_recv() {
                     match msg {
                         crate::ring::Msg::Swap(tl) => engine.submit_swap(tl),
+                        crate::ring::Msg::RecordStart(rec) => engine.start_recording(rec),
+                        crate::ring::Msg::RecordStop => engine.stop_recording(),
                         crate::ring::Msg::Shutdown => {
                             data.fill(0.0);
                             return;
