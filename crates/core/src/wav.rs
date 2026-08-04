@@ -5,11 +5,18 @@ use std::sync::Arc;
 use crate::error::{Error, ErrorKind, Result, Span};
 use crate::scheduler::SampleData;
 
+fn quantize(s: f32) -> i16 {
+    ((s.clamp(-1.0, 1.0) * 32768.0).round() as i32).clamp(-32768, 32767) as i16
+}
+
+fn check_len_fits(current: u32, add: usize) -> bool {
+    current as u64 + add as u64 <= u32::MAX as u64
+}
+
 pub fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for s in samples {
-        let v = ((s.clamp(-1.0, 1.0) * 32768.0).round() as i32).clamp(-32768, 32767) as i16;
-        pcm.extend_from_slice(&v.to_le_bytes());
+        pcm.extend_from_slice(&quantize(*s).to_le_bytes());
     }
     let data_len = pcm.len() as u32;
     let byte_rate = sample_rate * channels as u32 * 2;
@@ -60,8 +67,13 @@ impl WavWriter {
     pub fn write_interleaved(&mut self, frames: &[f32]) -> std::io::Result<()> {
         let mut pcm = Vec::with_capacity(frames.len() * 2);
         for s in frames {
-            let v = ((s.clamp(-1.0, 1.0) * 32768.0).round() as i32).clamp(-32768, 32767) as i16;
-            pcm.extend_from_slice(&v.to_le_bytes());
+            pcm.extend_from_slice(&quantize(*s).to_le_bytes());
+        }
+        if !check_len_fits(self.data_len, pcm.len()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "recording exceeds wav file size limit",
+            ));
         }
         self.data_len += pcm.len() as u32;
         self.file.write_all(&pcm)
@@ -241,5 +253,16 @@ mod tests {
         let data_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
         assert_eq!(data_len, 8);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wav_writer_len_check_rejects_overflow() {
+        assert!(check_len_fits(0, 0));
+        assert!(check_len_fits(u32::MAX, 0));
+        assert!(check_len_fits(u32::MAX - 2, 2));
+        assert!(!check_len_fits(u32::MAX, 2));
+        assert!(!check_len_fits(u32::MAX - 1, 2));
+        assert!(check_len_fits(0, u32::MAX as usize));
+        assert!(!check_len_fits(0, u32::MAX as usize + 1));
     }
 }
