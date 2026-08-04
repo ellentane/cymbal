@@ -7,6 +7,7 @@ pub mod parser;
 pub mod pattern;
 pub mod render;
 pub mod scheduler;
+pub mod timefmt;
 pub mod transform;
 pub mod transport;
 pub mod wav;
