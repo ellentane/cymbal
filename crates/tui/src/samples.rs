@@ -58,6 +58,23 @@ mod tests {
     }
 
     #[test]
+    fn builtin_sample_resolves_without_local_file() {
+        let dir = std::env::temp_dir().join(format!("cymbal_builtin_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "loop \"b\":\n    sample \"kick\" << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let samples = load_samples(&program, &dir).unwrap();
+        assert_eq!(samples.len(), 1);
+        let data = samples.get("kick").unwrap();
+        assert!(data.frames.len() > 100, "builtin kick must decode");
+        assert!(
+            data.frames.iter().any(|s| s.abs() > 0.001),
+            "builtin kick must not be silent"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_sample_reports_error() {
         let program =
             parse(&lex("loop \"b\":\n    sample \"nope.wav\" << \"x\"\n").unwrap()).unwrap();
