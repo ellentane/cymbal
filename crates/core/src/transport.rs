@@ -9,7 +9,7 @@ impl Transport {
 
     pub fn new(tempo: f64, sample_rate: u32) -> Self {
         Self {
-            tempo: tempo.clamp(1.0, 4000.0),
+            tempo: tempo.clamp(20.0, 4000.0),
             sample_rate,
         }
     }
@@ -59,5 +59,13 @@ mod tests {
     fn note_frequency() {
         assert!((Transport::note_frequency(69) - 440.0).abs() < 1e-9);
         assert!((Transport::note_frequency(60) - 261.6256).abs() < 0.001);
+    }
+
+    #[test]
+    fn tempo_floor_matches_ui() {
+        assert_eq!(Transport::new(15.0, 48000).tempo, 20.0);
+        assert_eq!(Transport::new(0.0, 48000).tempo, 20.0);
+        assert_eq!(Transport::new(20.0, 48000).tempo, 20.0);
+        assert_eq!(Transport::new(4000.0, 48000).tempo, 4000.0);
     }
 }
