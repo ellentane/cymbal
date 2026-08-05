@@ -67,8 +67,8 @@ jobs:
           mkdir -p dist
           cd crates/wasm/web
           zip -r cymbal-web.zip index.html main.js worklet.js cymbal_wasm.js cymbal_wasm_bg.wasm
-          mv cymbal-web.zip ../../dist/
-          cd ../../dist
+          mv cymbal-web.zip "$GITHUB_WORKSPACE/dist/"
+          cd "$GITHUB_WORKSPACE/dist"
           sha256sum cymbal-web.zip > cymbal-web.zip.sha256
       - uses: actions/upload-artifact@v4
         with:
