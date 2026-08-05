@@ -13,8 +13,8 @@ pub struct Recorder {
 impl Recorder {
     pub fn new(blocks: usize, block_frames: usize) -> Arc<Self> {
         let len = block_frames * 2;
-        let pool = ArrayQueue::new(blocks);
-        for _ in 0..blocks {
+        let pool = ArrayQueue::new(blocks + 8);
+        for _ in 0..(blocks + 8) {
             pool.push(vec![0.0f32; len].into_boxed_slice()).unwrap();
         }
         Arc::new(Self {
@@ -29,17 +29,14 @@ impl Recorder {
         self.block_frames
     }
 
-    // audio thread: fill a block from the pool (allocates only if the writer
-    // is behind)
     pub fn take_pool_block(&self) -> Box<[f32]> {
-        self.pool
-            .pop()
-            .unwrap_or_else(|| vec![0.0f32; self.block_frames * 2].into_boxed_slice())
+        self.pool.pop().expect("recorder pool must never empty")
     }
 
-    // audio thread: hand a full block to the writer; dropped when full (gap)
     pub fn push_filled(&self, block: Box<[f32]>) {
-        let _ = self.filled.push(block);
+        if let Err(block) = self.filled.push(block) {
+            let _ = self.pool.push(block);
+        }
     }
 
     // writer thread
@@ -58,6 +55,13 @@ impl Recorder {
 
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl Recorder {
+    pub fn pool_len(&self) -> usize {
+        self.pool.len()
     }
 }
 
@@ -91,17 +95,52 @@ mod tests {
     }
 
     #[test]
-    fn pool_exhaustion_drops_block() {
+    fn full_filled_recycles_block() {
         let rec = Recorder::new(1, 2);
+        let before = rec.pool_len();
         let b = rec.take_pool_block();
         rec.push_filled(b);
         let b2 = rec.take_pool_block();
         rec.push_filled(b2);
-        assert!(rec.take_filled().is_some(), "first block survives");
-        assert!(
-            rec.take_filled().is_none(),
-            "second block dropped when full"
+        let out = rec.take_filled().unwrap();
+        rec.return_block(out);
+        assert_eq!(
+            rec.pool_len(),
+            before,
+            "recycled block returned to the pool"
         );
+    }
+
+    #[test]
+    fn pool_never_empties_under_stalled_writer() {
+        let rec = Recorder::new(4, 4);
+        let mut min_pool = usize::MAX;
+        for _ in 0..1000 {
+            let b = rec.take_pool_block();
+            if let Some(f) = rec.take_filled() {
+                rec.return_block(f);
+            }
+            rec.push_filled(b);
+            min_pool = min_pool.min(rec.pool_len());
+        }
+        assert!(min_pool >= 1, "the pool must never empty: {min_pool}");
+    }
+
+    #[test]
+    fn pool_size_stays_stable() {
+        let rec = Recorder::new(4, 4);
+        let before = rec.pool_len();
+        for _ in 0..100 {
+            let b = rec.take_pool_block();
+            if let Some(f) = rec.take_filled() {
+                rec.return_block(f);
+            }
+            rec.push_filled(b);
+        }
+        while let Some(f) = rec.take_filled() {
+            rec.return_block(f);
+        }
+        assert_eq!(rec.pool_len(), before, "pool must not shrink");
     }
 
     #[test]
