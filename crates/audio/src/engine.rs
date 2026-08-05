@@ -1384,18 +1384,31 @@ mod tests {
             24000,
         );
         let mut engine = Engine::new(120.0, 48000);
-        let rec = Recorder::new(4, 4);
-        engine.start_recording(rec.clone(), vec![]);
         let mut out = vec![0.0f32; 48000 * 2];
-        COUNTING.with(|c| c.set(true));
-        ALLOCS.store(0, Ordering::SeqCst);
         engine.submit_swap(tl_a, 1);
         engine.process(&mut out);
+        let rec = Recorder::new(4, 4);
+        let rec2 = Recorder::new(4, 4);
+        let tracks = vec![("b".into(), rec2.clone())];
+        engine.stop_recording();
+        COUNTING.with(|c| c.set(true));
+        ALLOCS.store(0, Ordering::SeqCst);
+        engine.start_recording(rec.clone(), tracks);
         engine.submit_swap(tl_b, 2);
         engine.process(&mut out);
         engine.stop_recording();
         let count = ALLOCS.load(Ordering::SeqCst);
         COUNTING.with(|c| c.set(false));
+        assert_eq!(
+            engine.timeline.as_ref().map(|t| t.generation),
+            Some(1),
+            "the counted swap must have applied"
+        );
+        let b = rec2.take_filled().unwrap();
+        assert!(
+            b[..8].iter().any(|s| *s != 0.0),
+            "the per-track tap must capture the hat"
+        );
         assert_eq!(
             count, 0,
             "swap, triggers, recording taps, and swaps must not allocate"
