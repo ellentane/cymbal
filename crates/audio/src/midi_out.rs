@@ -51,6 +51,15 @@ impl MidiOut {
         None
     }
 
+    pub fn take_sys(&self) -> Option<Vec<u8>> {
+        while let Some(item) = self.tx.pop() {
+            if let MidiItem::Sys { bytes, len } = item {
+                return Some(bytes[..len as usize].to_vec());
+            }
+        }
+        None
+    }
+
     /// True if a port named `port_name` (or any port, if empty) exists.
     pub fn port_available(port_name: &str) -> bool {
         use midir::MidiOutput;

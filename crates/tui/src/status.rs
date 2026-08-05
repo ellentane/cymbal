@@ -6,6 +6,7 @@ pub struct Status {
     pub latency_ms: Option<f32>,
     pub device_rate: Option<u32>,
     pub midi_port: Option<String>,
+    pub midi_sending: bool,
     pub recording: bool,
     pub record_elapsed_secs: u64,
     pub error: Option<String>,
@@ -21,6 +22,7 @@ impl Status {
             latency_ms: None,
             device_rate: None,
             midi_port: None,
+            midi_sending: false,
             recording: false,
             record_elapsed_secs: 0,
             error: None,
@@ -55,10 +57,15 @@ impl Status {
             .filter(|p| !p.is_empty())
             .map(|p| format!("midi {p}"))
             .unwrap_or_else(|| "midi -".into());
+        let transport = if self.midi_sending {
+            String::from("midi run")
+        } else {
+            String::from("midi stop")
+        };
         let msg = self.error.clone().unwrap_or_else(|| self.message.clone());
         format!(
-            "tempo {:.0} | bar {} | loops {} | lat {} | {} | {} | {} | {}",
-            self.tempo, self.bar, loops, lat, rate, midi, rec, msg
+            "tempo {:.0} | bar {} | loops {} | lat {} | {} | {} | {} | {} | {}",
+            self.tempo, self.bar, loops, lat, rate, midi, transport, rec, msg
         )
     }
 
@@ -109,7 +116,7 @@ mod tests {
         s.latency_ms = Some(5.3333335);
         assert_eq!(
             s.render(),
-            "tempo 120 | bar 0 | loops b, h | lat ~5.3ms | - | midi - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
+            "tempo 120 | bar 0 | loops b, h | lat ~5.3ms | - | midi - | midi stop | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
         );
     }
 
@@ -118,7 +125,7 @@ mod tests {
         let s = Status::new();
         assert_eq!(
             s.render(),
-            "tempo 120 | bar 0 | loops - | lat - | - | midi - | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
+            "tempo 120 | bar 0 | loops - | lat - | - | midi - | midi stop | rec - | Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo"
         );
     }
 
@@ -155,6 +162,14 @@ mod tests {
         let mut s = Status::new();
         s.midi_port = Some(String::new());
         assert!(s.render().contains("| midi - |"));
+    }
+
+    #[test]
+    fn render_shows_midi_transport_state() {
+        let mut s = Status::new();
+        assert!(s.render().contains("midi stop"));
+        s.midi_sending = true;
+        assert!(s.render().contains("midi run"));
     }
 
     #[test]

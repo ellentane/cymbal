@@ -83,6 +83,7 @@ loop "beat":
 | Ctrl-= / Ctrl-- | raise / lower tempo; forces a full reload of every loop |
 | Alt-R / Alt-H / Alt-[ / Alt-] | reverse / half-speed / rotate the pattern on the cursor line, then reload at the next bar |
 | Ctrl-R | toggle recording — writes `recording-<timestamp>.wav` next to the file, plus `recording-<timestamp>-<loop>.wav` per loop present at record start; shows `REC mm:ss` in the status bar |
+| Ctrl-J | toggle MIDI start/stop (0xFA/0xFC) |
 | Ctrl-E | export the current song to `out.wav` next to the file |
 | Ctrl-Q | quit |
 

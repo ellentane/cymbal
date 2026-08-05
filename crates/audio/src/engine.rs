@@ -199,6 +199,12 @@ impl Engine {
         if self.rec_state.is_some() {
             self.stop_recording();
         }
+        if let Some(m) = &self.midi {
+            m.try_send(MidiItem::Sys {
+                bytes: [0xFA, 0, 0],
+                len: 1,
+            });
+        }
         self.rec_state = Some(RecState {
             rec: rec.clone(),
             current: rec.take_pool_block(),
@@ -229,6 +235,12 @@ impl Engine {
     }
 
     pub fn stop_recording(&mut self) {
+        if let Some(m) = &self.midi {
+            m.try_send(MidiItem::Sys {
+                bytes: [0xFC, 0, 0],
+                len: 1,
+            });
+        }
         if let Some(state) = self.rec_state.take() {
             let pos = state.pos;
             let mut cur = state.current;
@@ -777,6 +789,20 @@ mod tests {
             "captured post-master signal"
         );
         assert!(rec.is_stopped());
+    }
+
+    #[test]
+    fn record_start_and_stop_send_transport_messages() {
+        use crate::midi_out::MidiOut;
+        let mut engine = Engine::new(120.0, 48000);
+        let midi = MidiOut::new(64);
+        engine.set_midi(Some(midi.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.start_recording(Recorder::new(4, 4), vec![]);
+        engine_step(&mut engine, 4);
+        assert_eq!(midi.take_sys(), Some(vec![0xFA]), "start on record");
+        engine.stop_recording();
+        assert_eq!(midi.take_sys(), Some(vec![0xFC]), "stop on record end");
     }
 
     #[test]

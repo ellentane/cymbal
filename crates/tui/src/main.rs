@@ -425,6 +425,26 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(2)
 }
 
+fn midi_toggle(
+    midi: &Option<Arc<cymbal_audio::midi_out::MidiOut>>,
+    sending: &mut bool,
+) -> Option<String> {
+    let Some(out) = midi else {
+        return Some("no midi: nothing to start".into());
+    };
+    *sending = !*sending;
+    let (byte, label) = if *sending {
+        (0xFA, "midi start")
+    } else {
+        (0xFC, "midi stop")
+    };
+    let _ = out.try_send(cymbal_audio::midi_out::MidiItem::Sys {
+        bytes: [byte, 0, 0],
+        len: 1,
+    });
+    Some(label.into())
+}
+
 fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), String> {
     let src = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
@@ -459,7 +479,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
         queue.clone(),
         Arc::new(initial),
         |_e| {},
-        midi_out,
+        midi_out.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -483,6 +503,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut editor = Editor::new(src);
 
     let mut recording = false;
+    let mut midi_sending = false;
     let mut record_start: Option<Instant> = None;
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut reload_seq: u64 = 1;
@@ -660,6 +681,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             reload_seq += 1;
                             let seq = reload_seq;
                             spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
+                        }
+                        KeyCode::Char('j') => {
+                            if let Some(msg) = midi_toggle(&midi_out, &mut midi_sending) {
+                                status.clear_error();
+                                status.message = msg;
+                            }
                         }
                         _ => {}
                     }
@@ -1068,6 +1095,20 @@ mod tests {
             assert_eq!(alt_transform_kind(code), Some(expected));
         }
         assert_eq!(alt_transform_kind(KeyCode::Char('q')), None);
+    }
+
+    #[test]
+    fn midi_toggle_switches_start_stop() {
+        let out = cymbal_audio::midi_out::MidiOut::new(64);
+        let mut sending = false;
+        let msg1 = midi_toggle(&Some(out.clone()), &mut sending);
+        assert!(sending);
+        assert!(msg1.unwrap().contains("midi start"));
+        let msg2 = midi_toggle(&Some(out.clone()), &mut sending);
+        assert!(!sending);
+        assert!(msg2.unwrap().contains("midi stop"));
+        let msg3 = midi_toggle(&None, &mut sending);
+        assert!(msg3.unwrap().contains("no midi"));
     }
 
     #[test]
