@@ -201,6 +201,39 @@ mod tests {
     }
 
     #[test]
+    fn clock_exactly_one_period_late_is_skipped() {
+        let t0 = Instant::now();
+        let origin = Some((0u64, t0));
+        let mut sent = Vec::new();
+        let target = t0 + Duration::from_secs_f64(480.0 / 48000.0);
+        handle_now(
+            MidiItem::Clock { offset: 480 },
+            origin,
+            target + period(),
+            &mut sent,
+        );
+        assert!(
+            sent.is_empty(),
+            "clock exactly one period late must be skipped"
+        );
+    }
+
+    #[test]
+    fn clock_just_inside_skip_boundary_is_sent() {
+        let t0 = Instant::now();
+        let origin = Some((0u64, t0));
+        let mut sent = Vec::new();
+        let target = t0 + Duration::from_secs_f64(480.0 / 48000.0);
+        handle_now(
+            MidiItem::Clock { offset: 480 },
+            origin,
+            target + period() - Duration::from_millis(1),
+            &mut sent,
+        );
+        assert_eq!(sent, vec![vec![0xF8]]);
+    }
+
+    #[test]
     fn on_time_clock_is_sent() {
         let t0 = Instant::now();
         let origin = Some((0u64, t0));
@@ -208,7 +241,7 @@ mod tests {
         handle_now(
             MidiItem::Clock { offset: 48000 },
             origin,
-            t0 + Duration::from_millis(999),
+            t0 + Duration::from_secs(1),
             &mut sent,
         );
         assert_eq!(sent, vec![vec![0xF8]]);
