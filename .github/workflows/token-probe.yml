@@ -1,0 +1,15 @@
+name: token-probe
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo test > probe.txt
+          gh release upload v1.2.1 probe.txt --clobber && echo "UPLOAD-OK" || echo "UPLOAD-FAILED"
+          gh api -X PATCH repos/ellentane/cymbal/releases/365759915 -f body="probe body" && echo "PATCH-OK" || echo "PATCH-FAILED"
