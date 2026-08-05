@@ -1,5 +1,6 @@
 use crossbeam_queue::ArrayQueue;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub enum MidiItem {
     Note { offset: u64, bytes: [u8; 3] },
@@ -94,61 +95,139 @@ impl MidiOut {
     }
 }
 
+fn handle_item(
+    item: MidiItem,
+    origin: Option<(u64, Instant)>,
+    period: Duration,
+    now: Instant,
+    send: &mut impl FnMut(&[u8]),
+) {
+    match item {
+        MidiItem::Sys { bytes, len } => {
+            send(&bytes[..len as usize]);
+        }
+        MidiItem::Clock { offset } => {
+            let Some((o0, t0)) = origin else { return };
+            let delay = (offset as f64 - o0 as f64).max(0.0) / 48000.0;
+            let target = t0 + Duration::from_secs_f64(delay);
+            if now >= target + period {
+                return;
+            }
+            if now < target {
+                std::thread::sleep(target - now);
+            }
+            send(&[0xF8]);
+        }
+        MidiItem::Note { offset, bytes } => {
+            let Some((o0, t0)) = origin else { return };
+            let delay = (offset as f64 - o0 as f64).max(0.0) / 48000.0;
+            let target = t0 + Duration::from_secs_f64(delay);
+            if now < target {
+                std::thread::sleep(target - now);
+            }
+            send(&bytes);
+        }
+        MidiItem::Rebase { .. } => {}
+    }
+}
+
 fn writer_loop(tx: Arc<MidiOut>, mut conn: midir::MidiOutputConnection) {
-    use std::time::{Duration, Instant};
-    let mut origin_offset: Option<u64> = None;
-    let mut origin_time: Option<Instant> = None;
-    let mut next_pulse: Option<Instant> = None;
-    let mut pulse_period = Duration::from_millis(500);
+    let mut origin: Option<(u64, Instant)> = None;
+    let mut period = Duration::from_millis(500);
     loop {
-        if let Some(item) = tx.tx.pop() {
-            match item {
-                MidiItem::Rebase { offset, tempo } => {
-                    origin_offset = Some(offset);
-                    origin_time = Some(Instant::now());
-                    pulse_period = Duration::from_secs_f64(60.0 / (tempo.max(1.0) * 24.0));
-                    next_pulse = Some(Instant::now() + pulse_period);
-                }
-                MidiItem::Note { offset, bytes } => {
-                    let target = match (origin_offset, origin_time) {
-                        (Some(o0), Some(t0)) => {
-                            let delay = (offset as f64 - o0 as f64).max(0.0) / 48000.0;
-                            t0 + Duration::from_secs_f64(delay)
-                        }
-                        _ => Instant::now(),
-                    };
-                    loop {
-                        let now = Instant::now();
-                        if now >= target {
-                            break;
-                        }
-                        let wake = match next_pulse {
-                            Some(p) => target.min(p),
-                            None => target,
-                        };
-                        if wake > now {
-                            std::thread::sleep(wake - now);
-                        }
-                        if let Some(next) = next_pulse
-                            && Instant::now() >= next
-                        {
-                            let _ = conn.send(&[0xF8]);
-                            next_pulse = Some(next + pulse_period);
-                        }
-                    }
-                    let _ = conn.send(&bytes);
-                }
-                MidiItem::Clock { .. } | MidiItem::Sys { .. } => {}
-            }
-        } else {
+        let Some(item) = tx.tx.pop() else {
             std::thread::sleep(Duration::from_millis(2));
-        }
-        if let Some(next) = next_pulse {
-            let now = Instant::now();
-            if now >= next {
-                let _ = conn.send(&[0xF8]);
-                next_pulse = Some(next + pulse_period);
+            continue;
+        };
+        match item {
+            MidiItem::Rebase { offset, tempo } => {
+                origin = Some((offset, Instant::now()));
+                period = Duration::from_secs_f64(60.0 / (tempo.max(1.0) * 24.0));
             }
+            other => handle_item(other, origin, period, Instant::now(), &mut |b| {
+                let _ = conn.send(b);
+            }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn period() -> Duration {
+        Duration::from_secs_f64(250.0 / 48000.0)
+    }
+
+    fn handle_now(
+        item: MidiItem,
+        origin: Option<(u64, Instant)>,
+        now: Instant,
+        sent: &mut Vec<Vec<u8>>,
+    ) {
+        handle_item(item, origin, period(), now, &mut |b: &[u8]| {
+            sent.push(b.to_vec())
+        });
+    }
+
+    #[test]
+    fn sys_sends_immediately() {
+        let mut sent = Vec::new();
+        handle_now(
+            MidiItem::Sys {
+                bytes: [0xFA, 0, 0],
+                len: 1,
+            },
+            None,
+            Instant::now(),
+            &mut sent,
+        );
+        assert_eq!(sent, vec![vec![0xFA]]);
+    }
+
+    #[test]
+    fn overdue_clock_is_skipped() {
+        let t0 = Instant::now();
+        let origin = Some((0u64, t0));
+        let mut sent = Vec::new();
+        handle_now(
+            MidiItem::Clock { offset: 48000 },
+            origin,
+            t0 + Duration::from_secs(2),
+            &mut sent,
+        );
+        assert!(sent.is_empty(), "overdue clock must be skipped, not burst");
+    }
+
+    #[test]
+    fn on_time_clock_is_sent() {
+        let t0 = Instant::now();
+        let origin = Some((0u64, t0));
+        let mut sent = Vec::new();
+        handle_now(
+            MidiItem::Clock { offset: 48000 },
+            origin,
+            t0 + Duration::from_millis(999),
+            &mut sent,
+        );
+        assert_eq!(sent, vec![vec![0xF8]]);
+    }
+
+    #[test]
+    fn note_bytes_are_forwarded() {
+        let t0 = Instant::now();
+        let origin = Some((0u64, t0));
+        let mut sent = Vec::new();
+        handle_now(
+            MidiItem::Note {
+                offset: 48000,
+                bytes: [0x90, 60, 100],
+            },
+            origin,
+            t0 + Duration::from_secs(1),
+            &mut sent,
+        );
+        assert_eq!(sent, vec![vec![0x90, 60, 100]]);
     }
 }
