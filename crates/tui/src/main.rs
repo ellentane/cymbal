@@ -557,6 +557,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     for (_, r) in &tracks {
                                         r.stop();
                                     }
+                                    recording = false;
+                                    record_start = None;
                                     status.set_error(
                                         "recording queue full: recording aborted".into(),
                                     );
@@ -719,9 +721,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         recording = false;
                         record_start = None;
                         record_writers = Vec::new();
-                        let _ = queue.send(Msg::RecordStop);
+                        if queue.send(Msg::RecordStop).is_err() {
+                            status.set_error(format!("{s} (recording queue full: stop failed)"));
+                        } else {
+                            status.set_error(s);
+                        }
                         status.recording = false;
-                        status.set_error(s);
                     }
                     m => apply_ui_msg(&mut status, m),
                 }
