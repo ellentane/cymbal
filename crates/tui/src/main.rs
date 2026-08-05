@@ -584,6 +584,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     ));
                                 }
                                 let master_for_queue = master.clone();
+                                let spares: Vec<_> = (0..8)
+                                    .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
+                                    .collect();
                                 if queue
                                     .send(Msg::RecordStart {
                                         master: master_for_queue,
@@ -591,6 +594,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                             .iter()
                                             .map(|(n, r)| (n.clone(), r.clone()))
                                             .collect(),
+                                        spares,
                                     })
                                     .is_err()
                                 {

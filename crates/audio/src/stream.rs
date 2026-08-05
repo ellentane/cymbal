@@ -93,9 +93,11 @@ pub fn start_audio(
                 while let Some(msg) = queue.try_recv() {
                     match msg {
                         Msg::Swap(tl, seq) => engine.submit_swap(tl, seq),
-                        Msg::RecordStart { master, tracks } => {
-                            engine.start_recording(master, tracks)
-                        }
+                        Msg::RecordStart {
+                            master,
+                            tracks,
+                            spares,
+                        } => engine.start_recording(master, tracks, spares),
                         Msg::RecordStop => engine.stop_recording(),
                         Msg::Shutdown => {
                             data.fill(0.0);

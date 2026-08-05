@@ -11,6 +11,7 @@ pub enum Msg {
     RecordStart {
         master: Arc<Recorder>,
         tracks: Vec<(String, Arc<Recorder>)>,
+        spares: Vec<Arc<Recorder>>,
     },
     RecordStop,
     Shutdown,
@@ -107,6 +108,7 @@ mod tests {
         q.send(Msg::RecordStart {
             master: rec,
             tracks: vec![],
+            spares: vec![],
         })
         .unwrap();
         q.send(Msg::RecordStop).unwrap();
