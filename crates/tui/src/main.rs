@@ -1113,9 +1113,11 @@ mod tests {
         let msg1 = midi_toggle(&Some(out.clone()), &mut sending);
         assert!(sending);
         assert!(msg1.unwrap().contains("midi start"));
+        assert_eq!(out.take_sys(), Some(vec![0xFA]));
         let msg2 = midi_toggle(&Some(out.clone()), &mut sending);
         assert!(!sending);
         assert!(msg2.unwrap().contains("midi stop"));
+        assert_eq!(out.take_sys(), Some(vec![0xFC]));
         let msg3 = midi_toggle(&None, &mut sending);
         assert!(msg3.unwrap().contains("no midi"));
     }
@@ -1131,6 +1133,16 @@ mod tests {
         midi_toggle_key(&mut status, &Some(out.clone()), &mut sending);
         assert!(!status.midi_sending);
         assert!(status.message.contains("midi stop"));
+    }
+
+    #[test]
+    fn midi_toggle_key_without_port_reports_no_midi() {
+        let mut status = Status::new();
+        let mut sending = false;
+        midi_toggle_key(&mut status, &None, &mut sending);
+        assert!(!sending);
+        assert!(!status.midi_sending);
+        assert_eq!(status.message, "no midi: nothing to start");
     }
 
     #[test]
