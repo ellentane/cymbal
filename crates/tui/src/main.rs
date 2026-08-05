@@ -126,6 +126,59 @@ fn drain_pending(
     pending.remove(&seq).unwrap_or_default()
 }
 
+enum ClaimAction {
+    Spawn(String),
+    Pend,
+    Stale,
+    Ignore,
+}
+
+fn handle_claim(
+    rec: &Arc<cymbal_audio::recorder::Recorder>,
+    seq: u64,
+    loop_index: u32,
+    recent: &[(u64, Vec<String>)],
+    pending: &mut PendingClaims,
+    latest_seq: u64,
+    recording: bool,
+) -> ClaimAction {
+    if !recording {
+        return ClaimAction::Ignore;
+    }
+    if is_stale(seq, latest_seq) {
+        return ClaimAction::Stale;
+    }
+    if let Some(name) = resolve_claim(recent, seq, loop_index) {
+        return ClaimAction::Spawn(name);
+    }
+    pending
+        .entry(seq)
+        .or_default()
+        .push((loop_index, String::new(), rec.clone()));
+    ClaimAction::Pend
+}
+
+enum FlushAction {
+    Spawn(String),
+    Lost,
+    Ignore,
+}
+
+fn flush_claim(
+    seq: u64,
+    loop_index: u32,
+    recent: &[(u64, Vec<String>)],
+    recording: bool,
+) -> FlushAction {
+    if !recording {
+        return FlushAction::Ignore;
+    }
+    match resolve_claim(recent, seq, loop_index) {
+        Some(name) => FlushAction::Spawn(name),
+        None => FlushAction::Lost,
+    }
+}
+
 fn join_writers(writers: &mut Vec<std::thread::JoinHandle<()>>, deadline: Instant) {
     for w in writers.drain(..) {
         while !w.is_finished() && Instant::now() < deadline {
@@ -690,6 +743,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                         }));
                                     }
                                     record_writers = writers;
+                                    pending.clear();
                                     record_ts = Some(ts);
                                     record_dir = Some(dir);
                                     status.recording = true;
@@ -836,16 +890,26 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             seq,
                         );
                         for (loop_index, _, rec) in drain_pending(&mut pending, seq) {
-                            if record_ts.is_some()
-                                && let Some(name) = resolve_claim(&recent, seq, loop_index)
-                            {
-                                record_writers.push(spawn_track_writer(
-                                    &rec,
-                                    &name,
-                                    record_ts.as_deref(),
-                                    record_dir.as_deref(),
-                                    &msg_tx,
-                                ));
+                            match flush_claim(seq, loop_index, &recent, record_ts.is_some()) {
+                                FlushAction::Spawn(name) => {
+                                    record_writers.push(spawn_track_writer(
+                                        &rec,
+                                        &name,
+                                        record_ts.as_deref(),
+                                        record_dir.as_deref(),
+                                        &msg_tx,
+                                    ));
+                                }
+                                FlushAction::Lost => {
+                                    let _ = msg_tx.send(UiMsg::Err(Error::new(
+                                        cymbal_core::error::Span { line: 0, col: 0 },
+                                        cymbal_core::error::ErrorKind::Io,
+                                        format!(
+                                            "lost mid-recording track claim (seq {seq}): reload out of order"
+                                        ),
+                                    )));
+                                }
+                                FlushAction::Ignore => {}
                             }
                         }
                     }
@@ -872,17 +936,16 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         rec,
                         seq,
                         loop_index,
-                    } => {
-                        if record_ts.is_none() {
-                            continue;
-                        }
-                        if is_stale(seq, latest_seq) {
-                            let _ = msg_tx.send(UiMsg::Err(Error::new(
-                                cymbal_core::error::Span { line: 0, col: 0 },
-                                cymbal_core::error::ErrorKind::Io,
-                                format!("stale mid-recording track claim (seq {seq})"),
-                            )));
-                        } else if let Some(name) = resolve_claim(&recent, seq, loop_index) {
+                    } => match handle_claim(
+                        &rec,
+                        seq,
+                        loop_index,
+                        &recent,
+                        &mut pending,
+                        latest_seq,
+                        record_ts.is_some(),
+                    ) {
+                        ClaimAction::Spawn(name) => {
                             record_writers.push(spawn_track_writer(
                                 &rec,
                                 &name,
@@ -890,13 +953,17 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 record_dir.as_deref(),
                                 &msg_tx,
                             ));
-                        } else {
-                            pending
-                                .entry(seq)
-                                .or_default()
-                                .push((loop_index, String::new(), rec));
                         }
-                    }
+                        ClaimAction::Pend => {}
+                        ClaimAction::Stale => {
+                            let _ = msg_tx.send(UiMsg::Err(Error::new(
+                                cymbal_core::error::Span { line: 0, col: 0 },
+                                cymbal_core::error::ErrorKind::Io,
+                                format!("stale mid-recording track claim (seq {seq})"),
+                            )));
+                        }
+                        ClaimAction::Ignore => {}
+                    },
                 }
             }
             if recording && let Some(start) = record_start {
@@ -1620,5 +1687,93 @@ mod tests {
             "claimed loop written with the ts-name convention"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handle_claim_spawns_for_current_seq() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string(), "h".to_string()])];
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 2, 1, &recent, &mut pending, 2, true),
+            ClaimAction::Spawn(name) if name == "h"
+        ));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn handle_claim_errors_on_stale_seq() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(1, vec!["b".to_string()])];
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 1, 0, &recent, &mut pending, 2, true),
+            ClaimAction::Stale
+        ));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn handle_claim_pends_for_unseen_seq() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string()])];
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 3, 0, &recent, &mut pending, 2, true),
+            ClaimAction::Pend
+        ));
+        assert_eq!(pending.get(&3).map(Vec::len), Some(1));
+        assert_eq!(pending[&3][0].0, 0);
+    }
+
+    #[test]
+    fn handle_claim_ignores_off_recording() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string()])];
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 2, 0, &recent, &mut pending, 2, false),
+            ClaimAction::Ignore
+        ));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn flush_claim_spawns_once_the_reload_lands() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(3, vec!["b".to_string(), "h".to_string()])];
+        assert!(matches!(
+            flush_claim(3, 1, &recent, true),
+            FlushAction::Spawn(name) if name == "h"
+        ));
+    }
+
+    #[test]
+    fn flush_claim_reports_lost_when_reload_arrived_out_of_order() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string()])];
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 3, 0, &recent, &mut pending, 2, true),
+            ClaimAction::Pend
+        ));
+        let drained = drain_pending(&mut pending, 3);
+        assert_eq!(
+            drained.len(),
+            1,
+            "the pended claim is drained on its reload"
+        );
+        assert!(
+            matches!(flush_claim(3, 0, &recent, true), FlushAction::Lost),
+            "an out-of-order reload loses the claim loudly, not silently"
+        );
+    }
+
+    #[test]
+    fn flush_claim_ignores_off_recording() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(3, vec!["b".to_string()])];
+        assert!(matches!(
+            flush_claim(3, 0, &recent, false),
+            FlushAction::Ignore
+        ));
     }
 }
