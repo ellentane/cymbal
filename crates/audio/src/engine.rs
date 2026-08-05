@@ -52,6 +52,7 @@ pub struct Engine {
     track_acc_scratch: Vec<Option<(f32, f32)>>,
     midi: Option<Arc<MidiOut>>,
     ui: Option<Arc<UiQueue>>,
+    bar_count: u64,
     event_cursor: usize,
     midi_cursor: usize,
     next_pulse_abs: f64,
@@ -81,6 +82,7 @@ impl Engine {
             track_acc_scratch: Vec::with_capacity(512),
             midi: None,
             ui: None,
+            bar_count: 0,
             event_cursor: 0,
             midi_cursor: 0,
             next_pulse_abs: f64::MAX,
@@ -110,8 +112,9 @@ impl Engine {
                 self.apply_swap_at_boundary(now);
                 self.next_bar_abs += self.bar_samples;
                 if let Some(ui) = &self.ui {
-                    ui.try_push(UiEvent::Bar(now / self.bar_samples));
+                    ui.try_push(UiEvent::Bar(self.bar_count));
                 }
+                self.bar_count += 1;
             }
             if let Some(tl) = &self.timeline {
                 while self.event_cursor < tl.events.len()
@@ -1567,5 +1570,28 @@ mod tests {
             }
         }
         assert_eq!(bars, vec![0, 1, 2], "a bar tick at each boundary");
+    }
+
+    #[test]
+    fn bar_counter_stays_monotonic_across_tempo_change() {
+        use crate::ui_queue::{UiEvent, UiQueue};
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 12000), 1);
+        engine_step(&mut engine, 12000);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 2);
+        engine_step(&mut engine, 72000);
+        let mut bars = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::Bar(n) = ev {
+                bars.push(n);
+            }
+        }
+        assert_eq!(bars, vec![0, 1, 2, 3], "bars counted across the tempo swap");
+        assert!(
+            bars.windows(2).all(|w| w[0] < w[1]),
+            "bar ticks must never go backward"
+        );
     }
 }
