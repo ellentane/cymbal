@@ -1,0 +1,40 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - run: cargo build -p cymbal-wasm --release --target wasm32-unknown-unknown
+      - run: ~/.cargo/bin/wasm-bindgen --target web --out-dir crates/wasm/web target/wasm32-unknown-unknown/release/cymbal_wasm.wasm
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: crates/wasm/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

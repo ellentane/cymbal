@@ -38,3 +38,10 @@ jobs:
       - name: wasm tests (node)
         working-directory: crates/wasm
         run: cargo test --target wasm32-unknown-unknown
+
+  summary:
+    needs: [check, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "all checks green"
+
