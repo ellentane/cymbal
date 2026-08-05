@@ -335,6 +335,12 @@ fn parse_args(args: &[String]) -> ParsedArgs<'_> {
                 ["render", "--f32", input, output, seconds] => {
                     (port, Some((input, output, Some(seconds), true)), None, None)
                 }
+                ["render", input, output, seconds] => (
+                    port,
+                    Some((input, output, Some(seconds), false)),
+                    None,
+                    None,
+                ),
                 [file] => (port, None, None, Some(file)),
                 _ => (port, None, None, None),
             }
@@ -1280,6 +1286,22 @@ mod tests {
         let (midi, render, tracks, file) = parse_args(&args);
         assert_eq!(midi, Some(String::new()));
         assert_eq!(render, Some(("in.cym", "out.wav", None, false)));
+        assert_eq!(tracks, None);
+        assert_eq!(file, None);
+    }
+
+    #[test]
+    fn parse_args_midi_render_with_seconds() {
+        let args = vec![
+            "--midi".to_string(),
+            "render".to_string(),
+            "in.cym".to_string(),
+            "out.wav".to_string(),
+            "30".to_string(),
+        ];
+        let (midi, render, tracks, file) = parse_args(&args);
+        assert_eq!(midi, Some(String::new()));
+        assert_eq!(render, Some(("in.cym", "out.wav", Some("30"), false)));
         assert_eq!(tracks, None);
         assert_eq!(file, None);
     }
