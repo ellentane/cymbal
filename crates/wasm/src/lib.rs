@@ -56,9 +56,9 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn input_buffer_pointer_is_stable_across_growth() {
-        let p1 = unsafe { engine::eng_in_ptr(64) };
-        let p2 = unsafe { engine::eng_in_ptr(128) };
-        let p3 = unsafe { engine::eng_in_ptr(32) };
+        let p1 = engine::eng_in_ptr(64);
+        let p2 = engine::eng_in_ptr(128);
+        let p3 = engine::eng_in_ptr(32);
         assert_eq!(p1, p2, "growth must reuse the buffer (no leak)");
         assert_eq!(p1, p3, "shrink keeps the same allocation");
     }
