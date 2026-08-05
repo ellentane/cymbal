@@ -1,22 +1,128 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>cymbal web</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cymbal — live-coding pattern editor</title>
+    <style>
+      :root {
+        --bg: #101014;
+        --panel: #191920;
+        --line: #2a2a35;
+        --text: #e8e6e3;
+        --dim: #8b8894;
+        --accent: #d8a94f;
+        --accent-dim: #a37e2f;
+        --ok: #7ec699;
+        --err: #d96a6a;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, sans-serif;
+      }
+      header {
+        width: 100%;
+        padding: 40px 24px 8px;
+        text-align: center;
+      }
+      h1 {
+        margin: 0;
+        font-size: 2.4rem;
+        letter-spacing: 0.12em;
+        font-weight: 600;
+      }
+      h1 span { color: var(--accent); }
+      .tagline {
+        margin: 10px 0 0;
+        color: var(--dim);
+        font-size: 0.95rem;
+      }
+      main {
+        width: min(720px, calc(100% - 32px));
+        margin: 28px 0 48px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 260px;
+        resize: vertical;
+        padding: 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 0.92rem;
+        line-height: 1.55;
+        outline: none;
+      }
+      textarea:focus { border-color: var(--accent-dim); }
+      .controls {
+        display: flex;
+        gap: 12px;
+        margin-top: 16px;
+        align-items: center;
+      }
+      button {
+        padding: 10px 22px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        font-size: 0.95rem;
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      button:hover { border-color: var(--accent-dim); background: #20202a; }
+      button.play { background: var(--accent-dim); border-color: var(--accent-dim); color: #14100a; font-weight: 600; }
+      button.play:hover { background: var(--accent); }
+      #status {
+        margin-left: auto;
+        color: var(--dim);
+        font-family: var(--mono);
+        font-size: 0.85rem;
+      }
+      #status.error { color: var(--err); }
+      #status.ok { color: var(--ok); }
+      footer {
+        margin-top: auto;
+        padding: 20px;
+        color: var(--dim);
+        font-size: 0.82rem;
+      }
+      footer a { color: var(--accent-dim); text-decoration: none; }
+      footer a:hover { color: var(--accent); }
+    </style>
   </head>
   <body>
-    <textarea id="src" rows="12" cols="60">
+    <header>
+      <h1><span>cym</span>bal</h1>
+      <p class="tagline">a live-coding pattern editor for drum, bass, and lead synthesis</p>
+    </header>
+    <main>
+      <textarea id="src" spellcheck="false">
 tempo 120
 let kick = kick()
 let hat = hat()
 loop "b":
     kick << "x . . x . . x ."
-    hat << "x . x . x . x ."</textarea
-    >
-    <div>
-      <button id="play">play</button>
-      <button id="render">render wav</button>
-    </div>
+    hat << "x . x . x . x ."</textarea>
+      <div class="controls">
+        <button id="play" class="play">play</button>
+        <button id="render">render wav</button>
+        <span id="status"></span>
+      </div>
+    </main>
+    <footer>
+      <a href="https://github.com/ellentane/cymbal">github.com/ellentane/cymbal</a>
+    </footer>
     <script type="module" src="main.js"></script>
   </body>
 </html>
