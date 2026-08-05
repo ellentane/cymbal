@@ -445,6 +445,18 @@ fn midi_toggle(
     Some(label.into())
 }
 
+fn midi_toggle_key(
+    status: &mut Status,
+    midi: &Option<Arc<cymbal_audio::midi_out::MidiOut>>,
+    sending: &mut bool,
+) {
+    if let Some(msg) = midi_toggle(midi, sending) {
+        status.clear_error();
+        status.message = msg;
+        status.midi_sending = *sending;
+    }
+}
+
 fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), String> {
     let src = std::fs::read_to_string(file)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
@@ -683,10 +695,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
                         }
                         KeyCode::Char('j') => {
-                            if let Some(msg) = midi_toggle(&midi_out, &mut midi_sending) {
-                                status.clear_error();
-                                status.message = msg;
-                            }
+                            midi_toggle_key(&mut status, &midi_out, &mut midi_sending);
                         }
                         _ => {}
                     }
@@ -1109,6 +1118,19 @@ mod tests {
         assert!(msg2.unwrap().contains("midi stop"));
         let msg3 = midi_toggle(&None, &mut sending);
         assert!(msg3.unwrap().contains("no midi"));
+    }
+
+    #[test]
+    fn midi_toggle_key_wires_transport_state_into_status() {
+        let out = cymbal_audio::midi_out::MidiOut::new(64);
+        let mut status = Status::new();
+        let mut sending = false;
+        midi_toggle_key(&mut status, &Some(out.clone()), &mut sending);
+        assert!(status.midi_sending);
+        assert!(status.message.contains("midi start"));
+        midi_toggle_key(&mut status, &Some(out.clone()), &mut sending);
+        assert!(!status.midi_sending);
+        assert!(status.message.contains("midi stop"));
     }
 
     #[test]
