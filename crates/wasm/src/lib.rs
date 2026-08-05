@@ -12,32 +12,6 @@ fn to_js_err(e: cymbal_core::error::Error) -> JsError {
 }
 
 #[wasm_bindgen]
-pub fn compile_events(src: &str, seconds: u32) -> Result<String, JsError> {
-    let program = parse(&lex(src).map_err(to_js_err)?).map_err(to_js_err)?;
-    let tl = schedule(
-        &program,
-        &HashMap::new(),
-        &HashMap::new(),
-        seconds as u64 * 48000,
-        48000,
-    )
-    .map_err(to_js_err)?;
-    // minimal JSON: event offsets + voices, for web visualization
-    let mut out = String::from("[");
-    for (i, ev) in tl.events.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&format!(
-            "{{\"offset\":{},\"voice\":\"{:?}\"}}",
-            ev.sample_offset, ev.voice
-        ));
-    }
-    out.push(']');
-    Ok(out)
-}
-
-#[wasm_bindgen]
 pub fn render(src: &str, seconds: u32) -> Result<Vec<f32>, JsError> {
     render_offline(src, seconds as u64 * 48000, 48000, &HashMap::new()).map_err(to_js_err)
 }
@@ -78,6 +52,15 @@ mod tests {
         assert_eq!(events.len(), 8);
         assert_eq!(events[0].1, cymbal_core::ast::VoiceKind::Kick as u8);
         assert_eq!(events[1].1, cymbal_core::ast::VoiceKind::Hat as u8);
+    }
+
+    #[wasm_bindgen_test]
+    fn input_buffer_pointer_is_stable_across_growth() {
+        let p1 = unsafe { engine::eng_in_ptr(64) };
+        let p2 = unsafe { engine::eng_in_ptr(128) };
+        let p3 = unsafe { engine::eng_in_ptr(32) };
+        assert_eq!(p1, p2, "growth must reuse the buffer (no leak)");
+        assert_eq!(p1, p3, "shrink keeps the same allocation");
     }
 
     #[wasm_bindgen_test]

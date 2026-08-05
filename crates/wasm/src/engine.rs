@@ -75,7 +75,9 @@ pub extern "C" fn eng_alloc(bar_samples: u64, sample_rate: u32) -> *mut Eng {
 }
 
 /// # Safety
-/// `e` must be a pointer from `eng_alloc` (or null).
+/// `e` must be a pointer from `eng_alloc` (or null). Single-call only:
+/// a second call on the same pointer is UB and cannot be detected safely —
+/// callers must not re-enter.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn eng_free(e: *mut Eng) {
     if !e.is_null() {
@@ -204,16 +206,19 @@ pub extern "C" fn eng_out_ptr() -> *mut f32 {
     }
 }
 
-/// Scratch buffer for one `eng_submit` call; grows on demand.
+/// Single worklet thread: JS copies the buffer before the next call.
+static mut IN_BUF: *mut Vec<u8> = std::ptr::null_mut();
+
 #[unsafe(no_mangle)]
 pub extern "C" fn eng_in_ptr(len: usize) -> *mut u8 {
-    static mut IN: *mut u8 = std::ptr::null_mut();
-    static mut IN_CAP: usize = 0;
     unsafe {
-        if IN_CAP < len {
-            IN = Box::into_raw(vec![0u8; len].into_boxed_slice()) as *mut u8;
-            IN_CAP = len;
+        if IN_BUF.is_null() {
+            IN_BUF = Box::into_raw(Box::new(Vec::with_capacity(1024)));
         }
-        IN
+        let v = &mut *IN_BUF;
+        if v.len() < len {
+            v.resize(len, 0);
+        }
+        v.as_mut_ptr()
     }
 }
