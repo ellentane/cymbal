@@ -1182,7 +1182,8 @@ mod tests {
     #[test]
     fn reordered_loops_reindex_retained_voices() {
         // loop "a" (bass) is sounding; a swap reorders loops to ["c", "a"] with
-        // "a" unchanged (gen 0) — the bass must survive and stay audible.
+        // "a" unchanged (gen 0) and no events — the retained bass is the only
+        // signal source, so audio after the swap proves the voice survived.
         let mut engine = Engine::new(120.0, 48000);
         engine.submit_swap(
             tl(
@@ -1209,41 +1210,16 @@ mod tests {
                 }],
                 0,
                 vec![("a".into(), 0)],
-                24000,
+                2000,
             ),
             1,
         );
-        engine_step(&mut engine, 24000);
+        engine_step(&mut engine, 2000);
         engine.submit_swap(
-            tl(
-                vec![Event {
-                    sample_offset: 0,
-                    loop_name: "a".into(),
-                    loop_index: 1,
-                    voice: VoiceKind::Bass,
-                    pitch: Some(60),
-                    semitone: 0,
-                    velocity: 1.0,
-                    duration: 50000,
-                    generation: 0,
-                    pan: 0.0,
-                    delay_send: 0.0,
-                    reverb_send: 0.0,
-                    sample: None,
-                    bass: 0.0,
-                    treble: 0.0,
-                    comp: 0.0,
-                    sample_start: 0.0,
-                    sample_end: 1.0,
-                    sample_loop: false,
-                }],
-                0,
-                vec![("c".into(), 0), ("a".into(), 0)],
-                24000,
-            ),
+            tl(vec![], 0, vec![("c".into(), 0), ("a".into(), 0)], 2000),
             2,
         );
-        let out = engine_step(&mut engine, 24000);
+        let out = engine_step(&mut engine, 2000);
         assert!(
             out[0..16].iter().any(|s| *s != 0.0),
             "bass must survive the reorder (reindexed, not cut)"
