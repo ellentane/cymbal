@@ -418,9 +418,7 @@ impl Engine {
             }
         }
 
-        if !tl.midi.is_empty()
-            && let Some(m) = &self.midi
-        {
+        if let Some(m) = &self.midi {
             m.try_send(MidiItem::Rebase {
                 offset: now,
                 tempo: tl.tempo,
@@ -1294,11 +1292,31 @@ mod tests {
         let out = engine_step(&mut engine, 24000);
         assert_eq!(
             midi.take_rebase_offset(),
+            Some(0),
+            "rebase at the first swap"
+        );
+        assert_eq!(
+            midi.take_rebase_offset(),
             Some(24000),
             "rebase at the boundary"
         );
         assert_eq!(midi.take_note(), Some([0x99, 42, 100]));
         assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn midi_rebases_for_sample_only_songs() {
+        use crate::midi_out::MidiOut;
+        let mut engine = Engine::new(120.0, 48000);
+        let midi = MidiOut::new(8192);
+        engine.set_midi(Some(midi.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 24000);
+        assert_eq!(
+            midi.take_rebase_offset(),
+            Some(0),
+            "the rebase anchors the clock even without midi events"
+        );
     }
 
     #[test]
