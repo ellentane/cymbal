@@ -3,16 +3,11 @@ use std::sync::Arc;
 
 use cymbal_core::dsp::Voice;
 use cymbal_core::mixer::{Master, VoiceOutput};
-use cymbal_core::scheduler::{Event, Timeline};
+use cymbal_core::scheduler::Timeline;
 use cymbal_core::transport::Transport;
 
 use crate::midi_out::{MidiItem, MidiOut};
 use crate::recorder::Recorder;
-
-struct Scheduled {
-    at: u64,
-    event: Event,
-}
 
 struct RecState {
     rec: Arc<Recorder>,
@@ -28,7 +23,7 @@ struct TrackState {
 
 struct Active {
     until: u64,
-    loop_name: String,
+    loop_index: u32,
     generation: u64,
     voice: Voice,
     velocity: f32,
@@ -45,14 +40,14 @@ pub struct Engine {
     timeline_origin: u64,
     last_swap_seq: u64,
     pending: Option<(Arc<Timeline>, u64)>,
-    future: Vec<Scheduled>,
+    timeline: Option<Arc<Timeline>>,
     active: Vec<Active>,
     master: Master,
     rec_state: Option<RecState>,
     tracks: Vec<(String, TrackState)>,
     track_acc: Vec<(String, f32, f32)>,
     midi: Option<Arc<MidiOut>>,
-    midi_events: Vec<(u64, [u8; 3])>,
+    event_cursor: usize,
     midi_cursor: usize,
 }
 
@@ -68,14 +63,14 @@ impl Engine {
             timeline_origin: 0,
             last_swap_seq: 0,
             pending: None,
-            future: Vec::with_capacity(256),
-            active: Vec::with_capacity(32),
+            timeline: None,
+            active: Vec::with_capacity(512),
             master: Master::new(sample_rate, bar_samples),
             rec_state: None,
             tracks: Vec::new(),
             track_acc: Vec::new(),
             midi: None,
-            midi_events: Vec::new(),
+            event_cursor: 0,
             midi_cursor: 0,
         }
     }
@@ -98,13 +93,14 @@ impl Engine {
                 self.apply_swap_at_boundary(now);
                 self.next_bar_abs += self.bar_samples;
             }
-            while let Some(at) = self.future.first().map(|s| s.at) {
-                if at <= now {
-                    let s = self.future.remove(0);
-                    let e = &s.event;
+            if let Some(tl) = &self.timeline {
+                while self.event_cursor < tl.events.len()
+                    && tl.events[self.event_cursor].sample_offset + self.timeline_origin <= now
+                {
+                    let e = &tl.events[self.event_cursor];
                     self.active.push(Active {
-                        until: s.at + e.duration,
-                        loop_name: e.loop_name.clone(),
+                        until: self.timeline_origin + e.sample_offset + e.duration,
+                        loop_index: e.loop_index,
                         generation: e.generation,
                         voice: Voice::new(
                             e.voice,
@@ -116,19 +112,23 @@ impl Engine {
                         delay_send: e.delay_send,
                         reverb_send: e.reverb_send,
                     });
-                } else {
-                    break;
+                    self.event_cursor += 1;
                 }
             }
             self.active.retain(|a| a.until > now);
-            while self.midi_cursor < self.midi_events.len()
-                && self.midi_events[self.midi_cursor].0 <= now
-            {
-                let (offset, bytes) = self.midi_events[self.midi_cursor];
-                if let Some(m) = &self.midi {
-                    m.try_send(MidiItem::Note { offset, bytes });
+            if let Some(tl) = &self.timeline {
+                while self.midi_cursor < tl.midi.len()
+                    && tl.midi[self.midi_cursor].sample_offset + self.timeline_origin <= now
+                {
+                    let m = &tl.midi[self.midi_cursor];
+                    if let Some(out) = &self.midi {
+                        out.try_send(MidiItem::Note {
+                            offset: self.timeline_origin + m.sample_offset,
+                            bytes: m.bytes,
+                        });
+                    }
+                    self.midi_cursor += 1;
                 }
-                self.midi_cursor += 1;
             }
             self.master.begin_frame();
             for a in &mut self.active {
@@ -140,14 +140,15 @@ impl Engine {
                         delay_send: a.delay_send,
                         reverb_send: a.reverb_send,
                     });
-                    if let Some((_, l, r)) = self
-                        .track_acc
-                        .iter_mut()
-                        .find(|(n, _, _)| *n == a.loop_name)
-                    {
-                        let angle = (a.pan + 1.0) * std::f32::consts::PI / 4.0;
-                        *l += s * a.velocity * angle.cos();
-                        *r += s * a.velocity * angle.sin();
+                    if let Some(tl) = &self.timeline {
+                        let name = tl.loops.get(a.loop_index as usize);
+                        if let Some((_, l, r)) = name
+                            .and_then(|name| self.track_acc.iter_mut().find(|(n, _, _)| n == name))
+                        {
+                            let angle = (a.pan + 1.0) * std::f32::consts::PI / 4.0;
+                            *l += s * a.velocity * angle.cos();
+                            *r += s * a.velocity * angle.sin();
+                        }
                     }
                 }
             }
@@ -262,28 +263,20 @@ impl Engine {
             self.timeline_origin = now;
             self.bar_samples = tl.bar_samples;
             self.master.set_bar_samples(tl.bar_samples);
+            self.timeline = Some(tl.clone());
             let kept: HashMap<&str, u64> = tl
                 .loop_generations
                 .iter()
                 .map(|(n, g)| (n.as_str(), *g))
                 .collect();
-            self.active
-                .retain(|a| kept.get(a.loop_name.as_str()) == Some(&a.generation));
-            self.future.clear();
-            for ev in &tl.events {
-                self.future.push(Scheduled {
-                    at: self.timeline_origin + ev.sample_offset,
-                    event: ev.clone(),
-                });
-            }
-            self.future.sort_by_key(|s| s.at);
-            self.midi_events.clear();
+            self.active.retain(|a| {
+                tl.loops
+                    .get(a.loop_index as usize)
+                    .and_then(|n| kept.get(n.as_str()))
+                    == Some(&a.generation)
+            });
+            self.event_cursor = 0;
             self.midi_cursor = 0;
-            for ev in &tl.midi {
-                self.midi_events
-                    .push((self.timeline_origin + ev.sample_offset, ev.bytes));
-            }
-            self.midi_events.sort_by_key(|(o, _)| *o);
             if !tl.midi.is_empty()
                 && let Some(m) = &self.midi
             {
@@ -1091,5 +1084,33 @@ mod tests {
         );
         assert_eq!(midi.take_note(), Some([0x99, 42, 100]));
         assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn triggers_via_cursor_across_tempo_change() {
+        // same behavior pin as swap_rebases_grid_on_tempo_change, but exercises
+        // the cursor path: events fire from the swapped timeline at origin + offset
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(
+            tl(
+                vec![
+                    ev(0, VoiceKind::Kick, 1, 2400),
+                    ev(12000, VoiceKind::Kick, 1, 2400),
+                ],
+                1,
+                vec![("b".into(), 1)],
+                12000,
+            ),
+            2,
+        );
+        let out = engine_step(&mut engine, 24000);
+        assert!(out[0..16].iter().any(|s| *s != 0.0), "kick at origin + 0");
+        assert!(out[4800 * 2..4800 * 2 + 8].iter().all(|s| *s == 0.0));
+        assert!(
+            out[12000 * 2..12000 * 2 + 16].iter().any(|s| *s != 0.0),
+            "kick at origin + 12000 on the new grid"
+        );
     }
 }
