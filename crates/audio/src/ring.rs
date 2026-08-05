@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crossbeam_queue::ArrayQueue;
 use cymbal_core::scheduler::Timeline;
 
 use crate::recorder::Recorder;
@@ -16,22 +17,30 @@ pub enum Msg {
 }
 
 pub struct AudioQueue {
-    inner: crossbeam_queue::ArrayQueue<Msg>,
+    latest_swap: ArrayQueue<Msg>,
+    fifo: ArrayQueue<Msg>,
 }
 
 impl AudioQueue {
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: crossbeam_queue::ArrayQueue::new(capacity),
+            latest_swap: ArrayQueue::new(1),
+            fifo: ArrayQueue::new(capacity),
         }
     }
 
     pub fn send(&self, msg: Msg) -> Result<(), Msg> {
-        self.inner.push(msg)
+        match msg {
+            Msg::Swap(..) => {
+                let _ = self.latest_swap.pop();
+                self.latest_swap.push(msg)
+            }
+            other => self.fifo.push(other),
+        }
     }
 
     pub fn try_recv(&self) -> Option<Msg> {
-        self.inner.pop()
+        self.fifo.pop().or_else(|| self.latest_swap.pop())
     }
 }
 
@@ -60,16 +69,19 @@ mod tests {
         let q = AudioQueue::new(4);
         q.send(Msg::Swap(tl(1), 1)).unwrap();
         q.send(Msg::Swap(tl(2), 2)).unwrap();
-        assert!(matches!(q.try_recv(), Some(Msg::Swap(_, _))));
-        assert!(matches!(q.try_recv(), Some(Msg::Swap(_, _))));
+        let got = q.try_recv();
+        assert!(
+            matches!(got, Some(Msg::Swap(tl, _)) if tl.generation == 2),
+            "first swap is coalesced away"
+        );
         assert!(q.try_recv().is_none());
     }
 
     #[test]
     fn full_queue_rejects() {
         let q = AudioQueue::new(1);
-        assert!(q.send(Msg::Swap(tl(1), 1)).is_ok());
-        assert!(q.send(Msg::Swap(tl(2), 2)).is_err());
+        assert!(q.send(Msg::RecordStop).is_ok());
+        assert!(q.send(Msg::Shutdown).is_err());
     }
 
     #[test]
@@ -84,7 +96,7 @@ mod tests {
                 gens.push(tl.generation);
             }
         }
-        assert_eq!(gens, vec![0, 1, 2, 3, 4]);
+        assert_eq!(gens, vec![4]);
     }
 
     #[test]
@@ -116,6 +128,42 @@ mod tests {
                 Msg::Shutdown => "shutdown",
             });
         }
-        assert_eq!(order, vec!["swap", "shutdown", "swap"]);
+        assert_eq!(
+            order,
+            vec!["shutdown", "swap"],
+            "fifo drains before the swap slot"
+        );
+    }
+
+    #[test]
+    fn swap_slot_coalesces() {
+        let q = AudioQueue::new(16);
+        assert!(q.send(Msg::Swap(tl(1), 1)).is_ok());
+        assert!(q.send(Msg::Swap(tl(2), 2)).is_ok());
+        assert!(q.send(Msg::Swap(tl(3), 3)).is_ok());
+        let mut got = Vec::new();
+        while let Some(m) = q.try_recv() {
+            if let Msg::Swap(t, _) = m {
+                got.push(t.generation);
+            }
+        }
+        assert_eq!(got, vec![3], "only the newest swap survives");
+    }
+
+    #[test]
+    fn fifo_drains_before_swap_slot() {
+        let q = AudioQueue::new(16);
+        q.send(Msg::Swap(tl(1), 1)).unwrap();
+        q.send(Msg::RecordStop).unwrap();
+        let first = q.try_recv().unwrap();
+        assert!(matches!(first, Msg::RecordStop), "FIFO drains first");
+        assert!(matches!(q.try_recv().unwrap(), Msg::Swap(_, _)));
+    }
+
+    #[test]
+    fn fifo_overflow_reports_failure() {
+        let q = AudioQueue::new(1);
+        assert!(q.send(Msg::RecordStop).is_ok());
+        assert!(q.send(Msg::RecordStop).is_err(), "fifo full -> Err");
     }
 }

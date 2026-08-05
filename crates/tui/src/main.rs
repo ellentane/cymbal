@@ -509,7 +509,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             if recording {
                                 recording = false;
                                 status.recording = false;
-                                let _ = queue.send(Msg::RecordStop);
+                                if queue.send(Msg::RecordStop).is_err() {
+                                    status.set_error("recording queue full: stop failed".into());
+                                }
                                 let deadline = Instant::now() + Duration::from_secs(2);
                                 for w in record_writers.drain(..) {
                                     while !w.is_finished() && Instant::now() < deadline {
@@ -541,43 +543,57 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     ));
                                 }
                                 let master_for_queue = master.clone();
-                                let _ = queue.send(Msg::RecordStart {
-                                    master: master_for_queue,
-                                    tracks: tracks
-                                        .iter()
-                                        .map(|(n, r)| (n.clone(), r.clone()))
-                                        .collect(),
-                                });
-                                let tx = msg_tx.clone();
-                                let start = Instant::now();
-                                let mut writers = Vec::new();
-                                let m2 = master.clone();
-                                let p2 = master_path.clone();
-                                writers.push(std::thread::spawn(move || {
-                                    record_loop(&m2, &p2, &tx, start)
-                                }));
-                                for (name, rec) in &tracks {
-                                    let rec = rec.clone();
-                                    let path = free_path(
-                                        &dir,
-                                        &format!(
-                                            "recording-{ts}-{}",
-                                            cymbal_core::wav::sanitize_name(name)
-                                        ),
+                                if queue
+                                    .send(Msg::RecordStart {
+                                        master: master_for_queue,
+                                        tracks: tracks
+                                            .iter()
+                                            .map(|(n, r)| (n.clone(), r.clone()))
+                                            .collect(),
+                                    })
+                                    .is_err()
+                                {
+                                    master.stop();
+                                    for (_, r) in &tracks {
+                                        r.stop();
+                                    }
+                                    status.set_error(
+                                        "recording queue full: recording aborted".into(),
                                     );
+                                } else {
                                     let tx = msg_tx.clone();
                                     let start = Instant::now();
+                                    let mut writers = Vec::new();
+                                    let m2 = master.clone();
+                                    let p2 = master_path.clone();
                                     writers.push(std::thread::spawn(move || {
-                                        record_loop(&rec, &path, &tx, start)
+                                        record_loop(&m2, &p2, &tx, start)
                                     }));
+                                    for (name, rec) in &tracks {
+                                        let rec = rec.clone();
+                                        let path = free_path(
+                                            &dir,
+                                            &format!(
+                                                "recording-{ts}-{}",
+                                                cymbal_core::wav::sanitize_name(name)
+                                            ),
+                                        );
+                                        let tx = msg_tx.clone();
+                                        let start = Instant::now();
+                                        writers.push(std::thread::spawn(move || {
+                                            record_loop(&rec, &path, &tx, start)
+                                        }));
+                                    }
+                                    record_writers = writers;
+                                    status.recording = true;
+                                    status.clear_error();
+                                    status.message = "recording...".into();
                                 }
-                                record_writers = writers;
-                                status.recording = true;
-                                status.clear_error();
-                                status.message = "recording...".into();
                             } else {
                                 recording = false;
-                                let _ = queue.send(Msg::RecordStop);
+                                if queue.send(Msg::RecordStop).is_err() {
+                                    status.set_error("recording queue full: stop failed".into());
+                                }
                                 status.recording = false;
                                 status.message = "stopping...".into();
                             }
