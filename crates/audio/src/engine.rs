@@ -52,6 +52,8 @@ pub struct Engine {
     midi: Option<Arc<MidiOut>>,
     event_cursor: usize,
     midi_cursor: usize,
+    next_pulse_abs: f64,
+    pulse_period: f64,
 }
 
 impl Engine {
@@ -78,6 +80,8 @@ impl Engine {
             midi: None,
             event_cursor: 0,
             midi_cursor: 0,
+            next_pulse_abs: f64::MAX,
+            pulse_period: 1.0,
         }
     }
 
@@ -135,6 +139,14 @@ impl Engine {
                     }
                     self.midi_cursor += 1;
                 }
+            }
+            while self.next_pulse_abs <= now as f64 {
+                if let Some(m) = &self.midi {
+                    m.try_send(MidiItem::Clock {
+                        offset: self.next_pulse_abs as u64,
+                    });
+                }
+                self.next_pulse_abs += self.pulse_period;
             }
             self.master.begin_frame();
             for a in &mut self.active {
@@ -351,6 +363,9 @@ impl Engine {
                 tempo: tl.tempo,
             });
         }
+
+        self.pulse_period = tl.bar_samples as f64 / 96.0;
+        self.next_pulse_abs = now as f64 + self.pulse_period;
     }
 }
 
@@ -1174,7 +1189,7 @@ mod tests {
     fn midi_rebases_on_swap() {
         use crate::midi_out::MidiOut;
         let mut engine = Engine::new(120.0, 48000);
-        let midi = MidiOut::new(64);
+        let midi = MidiOut::new(8192);
         engine.set_midi(Some(midi.clone()));
         engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
         engine_step(&mut engine, 24000);
@@ -1462,5 +1477,42 @@ mod tests {
             "all events consumed by the cursor"
         );
         assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn clock_pulses_fire_on_the_24ppqn_grid() {
+        let mut engine = Engine::new(120.0, 48000);
+        let midi = crate::midi_out::MidiOut::new(8192);
+        engine.set_midi(Some(midi.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 2500);
+        let mut pulses = Vec::new();
+        while let Some(item) = midi.take_clock() {
+            pulses.push(item);
+        }
+        assert_eq!(
+            pulses.len(),
+            9,
+            "one pulse per 250 samples from 250 to 2250"
+        );
+        assert_eq!(pulses.first(), Some(&250), "boundary pulse skipped");
+        assert_eq!(pulses.last(), Some(&2250));
+    }
+
+    #[test]
+    fn pulse_grid_restarts_at_swap_boundary() {
+        let mut engine = Engine::new(120.0, 48000);
+        let midi = crate::midi_out::MidiOut::new(8192);
+        engine.set_midi(Some(midi.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(tl(vec![], 1, vec![("b".into(), 1)], 12000), 2);
+        engine_step(&mut engine, 12000);
+        let mut pulses = Vec::new();
+        while let Some(p) = midi.take_clock() {
+            pulses.push(p);
+        }
+        assert!(!pulses.contains(&24000), "boundary pulse is skipped");
+        assert!(pulses.contains(&24125));
     }
 }

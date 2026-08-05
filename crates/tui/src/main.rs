@@ -440,7 +440,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
         Some(port) => {
             let name = port.as_str();
             if cymbal_audio::midi_out::MidiOut::port_available(name) {
-                let out = cymbal_audio::midi_out::MidiOut::new(1024);
+                let out = cymbal_audio::midi_out::MidiOut::new(8192);
                 out.clone().spawn_writer(name);
                 status.midi_port = midi_port.clone();
                 Some(out)

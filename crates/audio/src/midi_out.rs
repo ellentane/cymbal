@@ -4,6 +4,8 @@ use std::sync::Arc;
 pub enum MidiItem {
     Note { offset: u64, bytes: [u8; 3] },
     Rebase { offset: u64, tempo: f64 },
+    Clock { offset: u64 },
+    Sys { bytes: [u8; 3], len: u8 },
 }
 
 pub struct MidiOut {
@@ -33,6 +35,15 @@ impl MidiOut {
     pub fn take_rebase_offset(&self) -> Option<u64> {
         while let Some(item) = self.tx.pop() {
             if let MidiItem::Rebase { offset, .. } = item {
+                return Some(offset);
+            }
+        }
+        None
+    }
+
+    pub fn take_clock(&self) -> Option<u64> {
+        while let Some(item) = self.tx.pop() {
+            if let MidiItem::Clock { offset } = item {
                 return Some(offset);
             }
         }
@@ -127,6 +138,7 @@ fn writer_loop(tx: Arc<MidiOut>, mut conn: midir::MidiOutputConnection) {
                     }
                     let _ = conn.send(&bytes);
                 }
+                MidiItem::Clock { .. } | MidiItem::Sys { .. } => {}
             }
         } else {
             std::thread::sleep(Duration::from_millis(2));
