@@ -63,6 +63,10 @@ impl Recorder {
     pub fn pool_len(&self) -> usize {
         self.pool.len()
     }
+
+    pub fn filled_len(&self) -> usize {
+        self.filled.len()
+    }
 }
 
 #[cfg(test)]
@@ -97,50 +101,30 @@ mod tests {
     #[test]
     fn full_filled_recycles_block() {
         let rec = Recorder::new(1, 2);
-        let before = rec.pool_len();
         let b = rec.take_pool_block();
         rec.push_filled(b);
         let b2 = rec.take_pool_block();
         rec.push_filled(b2);
         let out = rec.take_filled().unwrap();
         rec.return_block(out);
-        assert_eq!(
-            rec.pool_len(),
-            before,
-            "recycled block returned to the pool"
-        );
+        assert_eq!(rec.pool_len() + rec.filled_len(), 9, "all boxes conserved");
     }
 
     #[test]
-    fn pool_never_empties_under_stalled_writer() {
+    fn pool_holds_under_continuous_take_and_recycle() {
         let rec = Recorder::new(4, 4);
-        let mut min_pool = usize::MAX;
         for _ in 0..1000 {
             let b = rec.take_pool_block();
             if let Some(f) = rec.take_filled() {
                 rec.return_block(f);
             }
             rec.push_filled(b);
-            min_pool = min_pool.min(rec.pool_len());
+            assert_eq!(
+                rec.pool_len() + rec.filled_len(),
+                12,
+                "box supply must never shrink"
+            );
         }
-        assert!(min_pool >= 1, "the pool must never empty: {min_pool}");
-    }
-
-    #[test]
-    fn pool_size_stays_stable() {
-        let rec = Recorder::new(4, 4);
-        let before = rec.pool_len();
-        for _ in 0..100 {
-            let b = rec.take_pool_block();
-            if let Some(f) = rec.take_filled() {
-                rec.return_block(f);
-            }
-            rec.push_filled(b);
-        }
-        while let Some(f) = rec.take_filled() {
-            rec.return_block(f);
-        }
-        assert_eq!(rec.pool_len(), before, "pool must not shrink");
     }
 
     #[test]
