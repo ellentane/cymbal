@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build artifacts for'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: ALSA dev headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo build --release
+      - name: package
+        shell: bash
+        run: |
+          mkdir -p dist
+          ext=""
+          [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          cp "target/release/cymbal$ext" "dist/cymbal-${{ matrix.target }}$ext"
+          cd dist
+          sha256sum "cymbal-${{ matrix.target }}$ext" > "cymbal-${{ matrix.target }}$ext.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - run: cargo build -p cymbal-wasm --release --target wasm32-unknown-unknown
+      - run: ~/.cargo/bin/wasm-bindgen --target web --out-dir crates/wasm/web target/wasm32-unknown-unknown/release/cymbal_wasm.wasm
+      - name: package
+        run: |
+          mkdir -p dist
+          cd crates/wasm/web
+          zip -r cymbal-web.zip index.html main.js worklet.js cymbal_wasm.js cymbal_wasm_bg.wasm
+          mv cymbal-web.zip ../../dist/
+          cd ../../dist
+          sha256sum cymbal-web.zip > cymbal-web.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-web
+          path: dist/
+
+  release:
+    needs: [build, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: artifacts/**/*
