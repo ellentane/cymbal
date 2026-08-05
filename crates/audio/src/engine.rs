@@ -70,8 +70,8 @@ impl Engine {
             active: Vec::with_capacity(512),
             master: Master::new(sample_rate, bar_samples),
             rec_state: None,
-            tracks: Vec::new(),
-            track_acc: Vec::new(),
+            tracks: Vec::with_capacity(512),
+            track_acc: Vec::with_capacity(512),
             generations: Vec::with_capacity(512),
             tracks_scratch: Vec::with_capacity(512),
             track_acc_scratch: Vec::with_capacity(512),
@@ -197,26 +197,23 @@ impl Engine {
             .as_ref()
             .or(self.pending.as_ref().map(|(tl, _)| tl));
         let n = source.map_or(0, |t| t.loops.len());
-        let mut indexed = Vec::with_capacity(n);
-        indexed.resize(n, None);
+        self.tracks.clear();
+        self.tracks.resize(n, None);
+        self.track_acc.clear();
+        self.track_acc.resize(n, None);
         for (name, rec) in tracks {
             match source.and_then(|t| t.loops.iter().position(|n| n == &name)) {
                 Some(idx) => {
-                    indexed[idx] = Some(TrackState {
+                    self.tracks[idx] = Some(TrackState {
                         current: rec.take_pool_block(),
                         rec,
                         pos: 0,
-                    })
+                    });
+                    self.track_acc[idx] = Some((0.0, 0.0));
                 }
                 None => rec.stop(),
             }
         }
-        self.tracks = indexed;
-        self.track_acc = self
-            .tracks
-            .iter()
-            .map(|t| t.as_ref().map(|_| (0.0, 0.0)))
-            .collect();
     }
 
     pub fn stop_recording(&mut self) {
@@ -309,13 +306,13 @@ impl Engine {
                 .retain(|a| tl.loops.get(a.loop_index as usize).is_some());
         }
 
-        let old_tracks = std::mem::take(&mut self.tracks);
+        let mut old_tracks = std::mem::take(&mut self.tracks);
         let old_acc = std::mem::take(&mut self.track_acc);
         self.tracks_scratch.clear();
         self.tracks_scratch.resize(tl.loops.len(), None);
         self.track_acc_scratch.clear();
         self.track_acc_scratch.resize(tl.loops.len(), None);
-        for (old_idx, track) in old_tracks.into_iter().enumerate() {
+        for (old_idx, track) in old_tracks.drain(..).enumerate() {
             let name = match old_tl.as_ref() {
                 Some(t) => t.loops.get(old_idx).map(|s| s.as_str()).unwrap_or(""),
                 None => tl.loops.get(old_idx).map(|s| s.as_str()).unwrap_or(""),
@@ -343,6 +340,8 @@ impl Engine {
         }
         std::mem::swap(&mut self.tracks, &mut self.tracks_scratch);
         std::mem::swap(&mut self.track_acc, &mut self.track_acc_scratch);
+        self.tracks_scratch = old_tracks;
+        self.track_acc_scratch = old_acc;
 
         if !tl.midi.is_empty()
             && let Some(m) = &self.midi
@@ -360,6 +359,31 @@ mod tests {
     use super::*;
     use cymbal_core::ast::VoiceKind;
     use cymbal_core::scheduler::{Event, Timeline};
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counting;
+    static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+    // only the measuring test thread counts: parallel tests cannot pollute
+    thread_local! {
+        static COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if COUNTING.with(|c| c.get()) {
+                ALLOCS.fetch_add(1, Ordering::SeqCst);
+            }
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
 
     fn tl(
         events: Vec<Event>,
@@ -1341,5 +1365,89 @@ mod tests {
             b_blocks.iter().all(|b| b.iter().all(|s| *s == 0.0)),
             "loop b's track must stay silent"
         );
+    }
+
+    #[test]
+    fn swap_and_steady_state_allocate_nothing() {
+        // build everything first, then snapshot: harness allocations (Arc,
+        // Vecs, out buffer) must not be counted
+        let tl_a = tl(
+            vec![ev(0, VoiceKind::Hat, 0, 2400)],
+            0,
+            vec![("b".into(), 0)],
+            24000,
+        );
+        let tl_b = tl(
+            vec![ev(0, VoiceKind::Hat, 1, 2400)],
+            1,
+            vec![("b".into(), 1)],
+            24000,
+        );
+        let mut engine = Engine::new(120.0, 48000);
+        let rec = Recorder::new(4, 4);
+        engine.start_recording(rec.clone(), vec![]);
+        let mut out = vec![0.0f32; 48000 * 2];
+        COUNTING.with(|c| c.set(true));
+        ALLOCS.store(0, Ordering::SeqCst);
+        engine.submit_swap(tl_a, 1);
+        engine.process(&mut out);
+        engine.submit_swap(tl_b, 2);
+        engine.process(&mut out);
+        engine.stop_recording();
+        let count = ALLOCS.load(Ordering::SeqCst);
+        COUNTING.with(|c| c.set(false));
+        assert_eq!(
+            count, 0,
+            "swap, triggers, recording taps, and swaps must not allocate"
+        );
+    }
+
+    #[test]
+    fn same_offset_burst_uses_the_cursor() {
+        // 100k events at offset 0: the cursor path fires them all in the first
+        // frame without memmoving the remainder (remove(0) would be O(n^2))
+        let mut events = Vec::with_capacity(100_000);
+        for _ in 0..100_000u64 {
+            events.push(Event {
+                sample_offset: 0,
+                loop_name: "b".into(),
+                loop_index: 0,
+                voice: VoiceKind::Hat,
+                pitch: None,
+                semitone: 0,
+                velocity: 1.0,
+                duration: 2400,
+                generation: 0,
+                pan: 0.0,
+                delay_send: 0.0,
+                reverb_send: 0.0,
+                sample: None,
+                bass: 0.0,
+                treble: 0.0,
+                comp: 0.0,
+                sample_start: 0.0,
+                sample_end: 1.0,
+                sample_loop: false,
+            });
+        }
+        let tl = Arc::new(Timeline {
+            events,
+            generation: 0,
+            tempo: 120.0,
+            bar_samples: 24000,
+            sample_rate: 48000,
+            loops: vec!["b".into()],
+            loop_generations: vec![("b".into(), 0)],
+            midi: vec![],
+        });
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl, 1);
+        let mut out = vec![0.0f32; 100 * 2];
+        engine.process(&mut out);
+        assert_eq!(
+            engine.event_cursor, 100_000,
+            "all events consumed by the cursor"
+        );
+        assert!(out.iter().all(|s| s.is_finite()));
     }
 }
