@@ -45,7 +45,7 @@ loop "beat":
     hat   << "x . x . x . x ." pan=-0.5:0.5
 ```
 
-- `tempo <n>` sets the transport tempo (default 120).
+- `tempo <n>` sets the transport tempo (default 120; range 20–4000).
 - `let <name> = kick() | snare() | hat() | bass() | lead()` defines a voice.
 - `let <name> = sample "file.wav"` defines a sample voice from a WAV file;
   paths are relative to the `.cym` file. A bare name like `sample "kick"`
@@ -82,9 +82,9 @@ loop "beat":
 | Ctrl-S | reload the file — only changed loops rebuild, notes already sounding on unchanged loops keep playing |
 | Ctrl-= / Ctrl-- | raise / lower tempo; forces a full reload of every loop |
 | Alt-R / Alt-H / Alt-[ / Alt-] | reverse / half-speed / rotate the pattern on the cursor line, then reload at the next bar |
-| Ctrl-R | toggle recording — writes `recording-<timestamp>.wav` next to the file, plus `recording-<timestamp>-<loop>.wav` per loop present at record start; shows `REC mm:ss` in the status bar |
+| Ctrl-R | toggle recording — writes `recording-<timestamp>.wav` next to the file, plus `recording-<timestamp>-<loop>.wav` per loop present at record start — names are collision-guarded (`-2`, `-3`, … suffixes); shows `REC mm:ss` in the status bar |
 | Ctrl-J | toggle MIDI start/stop (0xFA/0xFC) |
-| Ctrl-E | export the current song to `out.wav` next to the file |
+| Ctrl-E | export the current song to `out.wav` next to the file — collision-guarded, so an existing `out.wav` becomes `out-2.wav`, `out-3.wav`, … |
 | Ctrl-Q | quit |
 
 ## Live reload
