@@ -654,7 +654,7 @@ mod tests {
         ] {
             let tl = src2timeline(src, 0, 96000);
             assert!(
-                tl.tempo >= 1.0,
+                tl.tempo >= 20.0,
                 "timeline tempo must be clamped to the transport range, got {}",
                 tl.tempo
             );
