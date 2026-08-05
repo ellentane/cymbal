@@ -7,6 +7,7 @@ use cymbal_core::transport::Transport;
 
 use crate::midi_out::{MidiItem, MidiOut};
 use crate::recorder::Recorder;
+use crate::ui_queue::{UiEvent, UiQueue};
 
 struct RecState {
     rec: Arc<Recorder>,
@@ -50,6 +51,7 @@ pub struct Engine {
     tracks_scratch: Vec<Option<TrackState>>,
     track_acc_scratch: Vec<Option<(f32, f32)>>,
     midi: Option<Arc<MidiOut>>,
+    ui: Option<Arc<UiQueue>>,
     event_cursor: usize,
     midi_cursor: usize,
     next_pulse_abs: f64,
@@ -78,6 +80,7 @@ impl Engine {
             tracks_scratch: Vec::with_capacity(512),
             track_acc_scratch: Vec::with_capacity(512),
             midi: None,
+            ui: None,
             event_cursor: 0,
             midi_cursor: 0,
             next_pulse_abs: f64::MAX,
@@ -93,6 +96,10 @@ impl Engine {
         self.midi = midi;
     }
 
+    pub fn set_ui(&mut self, ui: Option<Arc<UiQueue>>) {
+        self.ui = ui;
+    }
+
     pub fn process(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
         for frame in 0..frames {
@@ -102,6 +109,9 @@ impl Engine {
             while now >= self.next_bar_abs {
                 self.apply_swap_at_boundary(now);
                 self.next_bar_abs += self.bar_samples;
+                if let Some(ui) = &self.ui {
+                    ui.try_push(UiEvent::Bar(now / self.bar_samples));
+                }
             }
             if let Some(tl) = &self.timeline {
                 while self.event_cursor < tl.events.len()
@@ -1540,5 +1550,22 @@ mod tests {
         }
         assert!(!pulses.contains(&24000), "boundary pulse is skipped");
         assert!(pulses.contains(&24125));
+    }
+
+    #[test]
+    fn bar_ticks_are_pushed_at_boundaries() {
+        use crate::ui_queue::{UiEvent, UiQueue};
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 72000);
+        let mut bars = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::Bar(n) = ev {
+                bars.push(n);
+            }
+        }
+        assert_eq!(bars, vec![0, 1, 2], "a bar tick at each boundary");
     }
 }

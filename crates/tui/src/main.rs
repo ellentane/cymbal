@@ -468,6 +468,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
 
     let queue = Arc::new(AudioQueue::new(16));
+    let ui_queue = cymbal_audio::ui_queue::UiQueue::new(64);
     let base = file.parent().unwrap_or_else(|| std::path::Path::new("."));
     let initial =
         build_timeline_with(&src, SAMPLE_RATE, base, &HashMap::new()).map_err(|e| e.to_string())?;
@@ -498,6 +499,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
         Arc::new(initial),
         |_e| {},
         midi_out.clone(),
+        Some(ui_queue.clone()),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -771,6 +773,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         status.recording = false;
                     }
                     m => apply_ui_msg(&mut status, m),
+                }
+            }
+            if let Some(ev) = ui_queue.try_pop() {
+                match ev {
+                    cymbal_audio::ui_queue::UiEvent::Bar(n) => status.bar = n,
+                    cymbal_audio::ui_queue::UiEvent::TrackClaimed { .. } => {}
                 }
             }
             if recording && let Some(start) = record_start {

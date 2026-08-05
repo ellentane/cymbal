@@ -60,6 +60,7 @@ pub fn start_audio(
     initial: Arc<Timeline>,
     on_error: impl Fn(Error) + Send + 'static,
     midi: Option<Arc<crate::midi_out::MidiOut>>,
+    ui_queue: Option<Arc<crate::ui_queue::UiQueue>>,
 ) -> Result<AudioHandle, AudioError> {
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
@@ -71,6 +72,7 @@ pub fn start_audio(
     let mut engine = Engine::new(initial.tempo, Transport::SAMPLE_RATE);
     engine.submit_swap(initial, 1);
     engine.set_midi(midi);
+    engine.set_ui(ui_queue);
 
     let err_cb = move |e: cpal::StreamError| {
         on_error(Error::new(
