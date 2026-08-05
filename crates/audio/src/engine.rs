@@ -338,6 +338,7 @@ mod tests {
         Event {
             sample_offset: offset,
             loop_name: "b".into(),
+            loop_index: 0,
             voice,
             pitch: None,
             semitone: 0,
@@ -457,6 +458,7 @@ mod tests {
                     Event {
                         sample_offset: 0,
                         loop_name: "h".into(),
+                        loop_index: 1,
                         voice: VoiceKind::Hat,
                         pitch: None,
                         semitone: 0,
@@ -510,6 +512,7 @@ mod tests {
                 vec![Event {
                     sample_offset: 0,
                     loop_name: "b".into(),
+                    loop_index: 0,
                     voice: VoiceKind::Bass,
                     pitch: None,
                     semitone: 0,
@@ -540,6 +543,7 @@ mod tests {
                 vec![Event {
                     sample_offset: 0,
                     loop_name: "b".into(),
+                    loop_index: 0,
                     voice: VoiceKind::Bass,
                     pitch: None,
                     semitone: 0,
@@ -934,6 +938,7 @@ mod tests {
                     Event {
                         sample_offset: 0,
                         loop_name: "k".into(),
+                        loop_index: 0,
                         voice: VoiceKind::Kick,
                         pitch: None,
                         semitone: 0,
@@ -954,6 +959,7 @@ mod tests {
                     Event {
                         sample_offset: 0,
                         loop_name: "h".into(),
+                        loop_index: 1,
                         voice: VoiceKind::Hat,
                         pitch: None,
                         semitone: 0,

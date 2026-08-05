@@ -86,6 +86,7 @@ mod tests {
                     |(voice, pitch, velocity, sample_offset, duration)| crate::scheduler::Event {
                         sample_offset,
                         loop_name: "b".into(),
+                        loop_index: 0,
                         voice,
                         pitch,
                         semitone: 0,

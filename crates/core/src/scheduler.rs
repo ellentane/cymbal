@@ -36,6 +36,7 @@ pub struct SampleData {
 pub struct Event {
     pub sample_offset: u64,
     pub loop_name: String,
+    pub loop_index: u32,
     pub voice: VoiceKind,
     pub pitch: Option<u8>,
     pub semitone: i32,
@@ -110,6 +111,7 @@ pub fn schedule(
             .copied()
             .unwrap_or(auto_generation);
         max_generation = max_generation.max(generation);
+        let loop_index = loops.len() as u32;
         loops.push(loop_stmt.name.clone());
         loop_gens.push((loop_stmt.name.clone(), generation));
         let loop_tempo = loop_stmt.tempo.unwrap_or(tempo);
@@ -199,6 +201,7 @@ pub fn schedule(
                     events.push(Event {
                         sample_offset: offset,
                         loop_name: loop_stmt.name.clone(),
+                        loop_index,
                         voice,
                         pitch: if voice == VoiceKind::Sample {
                             None
@@ -965,5 +968,33 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Eval);
+    }
+
+    #[test]
+    fn events_carry_loop_index() {
+        let tl = src2timeline_v11(
+            "let kick = kick()\nlet hat = hat()\nloop \"b\":\n    kick << \"x\"\nloop \"h\":\n    hat << \"x\"\n",
+            &HashMap::new(),
+            &HashMap::new(),
+            24000,
+        )
+        .unwrap();
+        assert!(
+            tl.events
+                .iter()
+                .all(|e| e.loop_index == 0 || e.loop_index == 1)
+        );
+        assert!(
+            tl.events
+                .iter()
+                .filter(|e| e.loop_name == "b")
+                .all(|e| e.loop_index == 0)
+        );
+        assert!(
+            tl.events
+                .iter()
+                .filter(|e| e.loop_name == "h")
+                .all(|e| e.loop_index == 1)
+        );
     }
 }

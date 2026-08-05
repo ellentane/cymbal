@@ -201,6 +201,7 @@ mod tests {
                 Event {
                     sample_offset: 0,
                     loop_name: "b".into(),
+                    loop_index: 0,
                     voice: VoiceKind::Hat,
                     pitch: None,
                     semitone: 0,
@@ -221,6 +222,7 @@ mod tests {
                 Event {
                     sample_offset: 24000,
                     loop_name: "b".into(),
+                    loop_index: 0,
                     voice: VoiceKind::Hat,
                     pitch: None,
                     semitone: 0,
