@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use cymbal_core::dsp::Voice;
@@ -15,6 +14,7 @@ struct RecState {
     pos: usize,
 }
 
+#[derive(Clone)]
 struct TrackState {
     rec: Arc<Recorder>,
     current: Box<[f32]>,
@@ -44,8 +44,11 @@ pub struct Engine {
     active: Vec<Active>,
     master: Master,
     rec_state: Option<RecState>,
-    tracks: Vec<(String, TrackState)>,
-    track_acc: Vec<(String, f32, f32)>,
+    tracks: Vec<Option<TrackState>>,
+    track_acc: Vec<Option<(f32, f32)>>,
+    generations: Vec<u64>,
+    tracks_scratch: Vec<Option<TrackState>>,
+    track_acc_scratch: Vec<Option<(f32, f32)>>,
     midi: Option<Arc<MidiOut>>,
     event_cursor: usize,
     midi_cursor: usize,
@@ -69,6 +72,9 @@ impl Engine {
             rec_state: None,
             tracks: Vec::new(),
             track_acc: Vec::new(),
+            generations: Vec::with_capacity(512),
+            tracks_scratch: Vec::with_capacity(512),
+            track_acc_scratch: Vec::with_capacity(512),
             midi: None,
             event_cursor: 0,
             midi_cursor: 0,
@@ -140,15 +146,14 @@ impl Engine {
                         delay_send: a.delay_send,
                         reverb_send: a.reverb_send,
                     });
-                    if let Some(tl) = &self.timeline {
-                        let name = tl.loops.get(a.loop_index as usize);
-                        if let Some((_, l, r)) = name
-                            .and_then(|name| self.track_acc.iter_mut().find(|(n, _, _)| n == name))
-                        {
-                            let angle = (a.pan + 1.0) * std::f32::consts::PI / 4.0;
-                            *l += s * a.velocity * angle.cos();
-                            *r += s * a.velocity * angle.sin();
-                        }
+                    if let Some(acc) = self
+                        .track_acc
+                        .get_mut(a.loop_index as usize)
+                        .and_then(|o| o.as_mut())
+                    {
+                        let angle = (a.pan + 1.0) * std::f32::consts::PI / 4.0;
+                        acc.0 += s * a.velocity * angle.cos();
+                        acc.1 += s * a.velocity * angle.sin();
                     }
                 }
             }
@@ -157,21 +162,22 @@ impl Engine {
             out[frame * 2] = frame_out[0];
             out[frame * 2 + 1] = frame_out[1];
             self.push_rec_frame(frame_out[0], frame_out[1]);
-            for (name, l, r) in &self.track_acc {
-                if let Some((_, st)) = self.tracks.iter_mut().find(|(n, _)| n == name) {
-                    st.current[st.pos * 2] = *l;
-                    st.current[st.pos * 2 + 1] = *r;
-                    st.pos += 1;
-                    if st.pos == st.rec.block_frames() {
-                        let full = std::mem::replace(&mut st.current, st.rec.take_pool_block());
-                        st.rec.push_filled(full);
-                        st.pos = 0;
-                    }
+            for (i, acc) in self.track_acc.iter().enumerate() {
+                let Some((l, r)) = acc else { continue };
+                let Some(st) = self.tracks.get_mut(i).and_then(|o| o.as_mut()) else {
+                    continue;
+                };
+                st.current[st.pos * 2] = *l;
+                st.current[st.pos * 2 + 1] = *r;
+                st.pos += 1;
+                if st.pos == st.rec.block_frames() {
+                    let full = std::mem::replace(&mut st.current, st.rec.take_pool_block());
+                    st.rec.push_filled(full);
+                    st.pos = 0;
                 }
             }
-            for (_, l, r) in &mut self.track_acc {
-                *l = 0.0;
-                *r = 0.0;
+            for acc in self.track_acc.iter_mut().flatten() {
+                *acc = (0.0, 0.0);
             }
         }
         self.position += frames as u64;
@@ -186,23 +192,30 @@ impl Engine {
             current: rec.take_pool_block(),
             pos: 0,
         });
-        self.tracks = tracks
-            .into_iter()
-            .map(|(name, rec)| {
-                (
-                    name.clone(),
-                    TrackState {
+        let source = self
+            .timeline
+            .as_ref()
+            .or(self.pending.as_ref().map(|(tl, _)| tl));
+        let n = source.map_or(0, |t| t.loops.len());
+        let mut indexed = Vec::with_capacity(n);
+        indexed.resize(n, None);
+        for (name, rec) in tracks {
+            match source.and_then(|t| t.loops.iter().position(|n| n == &name)) {
+                Some(idx) => {
+                    indexed[idx] = Some(TrackState {
                         current: rec.take_pool_block(),
                         rec,
                         pos: 0,
-                    },
-                )
-            })
-            .collect();
+                    })
+                }
+                None => rec.stop(),
+            }
+        }
+        self.tracks = indexed;
         self.track_acc = self
             .tracks
             .iter()
-            .map(|(n, _)| (n.clone(), 0.0, 0.0))
+            .map(|t| t.as_ref().map(|_| (0.0, 0.0)))
             .collect();
     }
 
@@ -218,26 +231,19 @@ impl Engine {
             }
             state.rec.stop();
         }
-        let names: Vec<String> = self.tracks.iter().map(|(n, _)| n.clone()).collect();
-        for name in names {
-            self.flush_track(&name);
-        }
-        self.track_acc.clear();
-    }
-
-    fn flush_track(&mut self, name: &str) {
-        if let Some(idx) = self.tracks.iter().position(|(n, _)| n == name) {
-            let (_, mut st) = self.tracks.remove(idx);
+        for st in self.tracks.iter_mut().flatten() {
             let pos = st.pos;
             if pos > 0 {
-                for s in &mut st.current[pos * 2..] {
+                let mut cur = std::mem::take(&mut st.current);
+                for s in &mut cur[pos * 2..] {
                     *s = 0.0;
                 }
-                st.rec.push_filled(st.current);
+                st.rec.push_filled(cur);
             }
             st.rec.stop();
         }
-        self.track_acc.retain(|(n, _, _)| n != name);
+        self.tracks.clear();
+        self.track_acc.clear();
     }
 
     fn push_rec_frame(&mut self, l: f32, r: f32) {
@@ -255,51 +261,90 @@ impl Engine {
     }
 
     fn apply_swap_at_boundary(&mut self, now: u64) {
-        if let Some((tl, seq)) = self.pending.take() {
-            if seq <= self.last_swap_seq {
-                return;
-            }
-            self.last_swap_seq = seq;
-            self.timeline_origin = now;
-            self.bar_samples = tl.bar_samples;
-            self.master.set_bar_samples(tl.bar_samples);
-            let prev = self.timeline.clone();
-            self.timeline = Some(tl.clone());
-            let kept: HashMap<&str, u64> = tl
-                .loop_generations
-                .iter()
-                .map(|(n, g)| (n.as_str(), *g))
-                .collect();
-            self.active.retain(|a| {
-                prev.as_ref()
-                    .and_then(|p| p.loops.get(a.loop_index as usize))
-                    .and_then(|n| kept.get(n.as_str()))
-                    == Some(&a.generation)
+        let Some((tl, seq)) = self.pending.take() else {
+            return;
+        };
+        if seq <= self.last_swap_seq {
+            return;
+        }
+        self.last_swap_seq = seq;
+
+        let old_tl = self.timeline.replace(tl.clone());
+        self.timeline_origin = now;
+        self.bar_samples = tl.bar_samples;
+        self.master.set_bar_samples(tl.bar_samples);
+        self.event_cursor = 0;
+        self.midi_cursor = 0;
+
+        let max_index = tl.loops.len().min(512);
+        self.generations.clear();
+        self.generations.resize(max_index, 0);
+        for (i, (_, g)) in tl.loop_generations.iter().take(max_index).enumerate() {
+            self.generations[i] = *g;
+        }
+
+        if let Some(old) = old_tl.as_ref() {
+            self.active.retain_mut(|a| {
+                let name = old
+                    .loops
+                    .get(a.loop_index as usize)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                match tl.loops.iter().position(|n| n == name) {
+                    Some(new_idx)
+                        if self.generations.get(new_idx).copied() == Some(a.generation) =>
+                    {
+                        a.loop_index = new_idx as u32;
+                        true
+                    }
+                    _ => false,
+                }
             });
-            self.event_cursor = 0;
-            self.midi_cursor = 0;
-            if !tl.midi.is_empty()
-                && let Some(m) = &self.midi
-            {
-                m.try_send(MidiItem::Rebase {
-                    offset: now,
-                    tempo: tl.tempo,
-                });
-            }
-            let mut i = 0;
-            while i < self.tracks.len() {
-                if tl.loops.contains(&self.tracks[i].0) {
-                    i += 1;
-                } else {
-                    let name = self.tracks[i].0.clone();
-                    self.flush_track(&name);
+        } else {
+            self.active
+                .retain(|a| tl.loops.get(a.loop_index as usize).is_some());
+        }
+
+        let old_tracks = std::mem::take(&mut self.tracks);
+        let old_acc = std::mem::take(&mut self.track_acc);
+        self.tracks_scratch.clear();
+        self.tracks_scratch.resize(tl.loops.len(), None);
+        self.track_acc_scratch.clear();
+        self.track_acc_scratch.resize(tl.loops.len(), None);
+        for (old_idx, track) in old_tracks.into_iter().enumerate() {
+            let name = match old_tl.as_ref() {
+                Some(t) => t.loops.get(old_idx).map(|s| s.as_str()).unwrap_or(""),
+                None => tl.loops.get(old_idx).map(|s| s.as_str()).unwrap_or(""),
+            };
+            match tl.loops.iter().position(|n| n == name) {
+                Some(new_idx) => {
+                    self.tracks_scratch[new_idx] = track;
+                    self.track_acc_scratch[new_idx] = old_acc.get(old_idx).copied().flatten();
+                }
+                None => {
+                    if let Some(mut st) = track {
+                        let pos = st.pos;
+                        if pos > 0 {
+                            for s in &mut st.current[pos * 2..] {
+                                *s = 0.0;
+                            }
+                            st.rec.push_filled(st.current);
+                        }
+                        st.rec.stop();
+                    }
                 }
             }
-            self.track_acc = self
-                .tracks
-                .iter()
-                .map(|(n, _)| (n.clone(), 0.0, 0.0))
-                .collect();
+        }
+        std::mem::swap(&mut self.tracks, &mut self.tracks_scratch);
+        std::mem::swap(&mut self.track_acc, &mut self.track_acc_scratch);
+
+        if !tl.midi.is_empty()
+            && let Some(m) = &self.midi
+        {
+            m.try_send(MidiItem::Rebase {
+                offset: now,
+                tempo: tl.tempo,
+            });
         }
     }
 }
@@ -1131,6 +1176,149 @@ mod tests {
         assert!(
             out[0..16].iter().any(|s| *s != 0.0),
             "ringing h voice must survive when the loop list shrinks"
+        );
+    }
+
+    #[test]
+    fn reordered_loops_reindex_retained_voices() {
+        // loop "a" (bass) is sounding; a swap reorders loops to ["c", "a"] with
+        // "a" unchanged (gen 0) — the bass must survive and stay audible.
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(
+            tl(
+                vec![Event {
+                    sample_offset: 0,
+                    loop_name: "a".into(),
+                    loop_index: 0,
+                    voice: VoiceKind::Bass,
+                    pitch: Some(60),
+                    semitone: 0,
+                    velocity: 1.0,
+                    duration: 50000,
+                    generation: 0,
+                    pan: 0.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                    sample: None,
+                    bass: 0.0,
+                    treble: 0.0,
+                    comp: 0.0,
+                    sample_start: 0.0,
+                    sample_end: 1.0,
+                    sample_loop: false,
+                }],
+                0,
+                vec![("a".into(), 0)],
+                24000,
+            ),
+            1,
+        );
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(
+            tl(
+                vec![Event {
+                    sample_offset: 0,
+                    loop_name: "a".into(),
+                    loop_index: 1,
+                    voice: VoiceKind::Bass,
+                    pitch: Some(60),
+                    semitone: 0,
+                    velocity: 1.0,
+                    duration: 50000,
+                    generation: 0,
+                    pan: 0.0,
+                    delay_send: 0.0,
+                    reverb_send: 0.0,
+                    sample: None,
+                    bass: 0.0,
+                    treble: 0.0,
+                    comp: 0.0,
+                    sample_start: 0.0,
+                    sample_end: 1.0,
+                    sample_loop: false,
+                }],
+                0,
+                vec![("c".into(), 0), ("a".into(), 0)],
+                24000,
+            ),
+            2,
+        );
+        let out = engine_step(&mut engine, 24000);
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "bass must survive the reorder (reindexed, not cut)"
+        );
+    }
+
+    #[test]
+    fn changed_loop_is_cut_after_reorder() {
+        // loop "a" gen 0 sounding; swap reorders to ["c", "a"] with "a" gen 1 —
+        // the old gen-0 voice must be cut at the boundary.
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(
+            tl(
+                vec![ev(0, VoiceKind::Bass, 0, 50000)],
+                0,
+                vec![("a".into(), 0)],
+                24000,
+            ),
+            1,
+        );
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(
+            tl(vec![], 1, vec![("c".into(), 0), ("a".into(), 1)], 24000),
+            2,
+        );
+        let out = engine_step(&mut engine, 4800);
+        assert!(
+            out[0..16].iter().all(|s| *s == 0.0),
+            "reindexed gen-0 voice must be cut when its loop changed"
+        );
+    }
+
+    #[test]
+    fn retained_voice_routes_to_reindexed_track() {
+        // loops ["a", "b"] with bass on "a" (index 0) ringing; a swap reorders
+        // to ["b", "a"] with no events — the retained bass must be reindexed to
+        // position 1 so its stem keeps landing in loop "a"'s track, not "b"'s.
+        let mut engine = Engine::new(120.0, 48000);
+        let mut bass = ev(0, VoiceKind::Bass, 0, 50000);
+        bass.loop_name = "a".into();
+        engine.submit_swap(
+            tl(vec![bass], 0, vec![("a".into(), 0), ("b".into(), 0)], 2000),
+            1,
+        );
+        engine_step(&mut engine, 2000);
+        let rec_a = Recorder::new(4, 2000);
+        let rec_b = Recorder::new(4, 2000);
+        engine.start_recording(
+            Recorder::new(4, 2000),
+            vec![("a".into(), rec_a.clone()), ("b".into(), rec_b.clone())],
+        );
+        engine_step(&mut engine, 2000);
+        engine.submit_swap(
+            tl(vec![], 1, vec![("b".into(), 0), ("a".into(), 0)], 2000),
+            2,
+        );
+        let out = engine_step(&mut engine, 2000);
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "retained bass keeps ringing after the reorder"
+        );
+        engine_step(&mut engine, 2000);
+        engine_step(&mut engine, 2000);
+        engine.stop_recording();
+        let a_blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec_a.take_filled()).collect();
+        let b_blocks: Vec<Box<[f32]>> = std::iter::from_fn(|| rec_b.take_filled()).collect();
+        assert_eq!(a_blocks.len(), 4, "one block per recorded bar for loop a");
+        assert_eq!(b_blocks.len(), 4, "one block per recorded bar for loop b");
+        assert!(
+            a_blocks[1][..16].iter().any(|s| *s != 0.0),
+            "retained bass must route to loop a's track after the reorder"
+        );
+        assert!(
+            b_blocks.iter().all(|b| b.iter().all(|s| *s == 0.0)),
+            "loop b's track must stay silent"
         );
     }
 }
