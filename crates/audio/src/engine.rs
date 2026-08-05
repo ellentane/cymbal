@@ -263,6 +263,7 @@ impl Engine {
             self.timeline_origin = now;
             self.bar_samples = tl.bar_samples;
             self.master.set_bar_samples(tl.bar_samples);
+            let prev = self.timeline.clone();
             self.timeline = Some(tl.clone());
             let kept: HashMap<&str, u64> = tl
                 .loop_generations
@@ -270,8 +271,8 @@ impl Engine {
                 .map(|(n, g)| (n.as_str(), *g))
                 .collect();
             self.active.retain(|a| {
-                tl.loops
-                    .get(a.loop_index as usize)
+                prev.as_ref()
+                    .and_then(|p| p.loops.get(a.loop_index as usize))
                     .and_then(|n| kept.get(n.as_str()))
                     == Some(&a.generation)
             });
@@ -1111,6 +1112,25 @@ mod tests {
         assert!(
             out[12000 * 2..12000 * 2 + 16].iter().any(|s| *s != 0.0),
             "kick at origin + 12000 on the new grid"
+        );
+    }
+
+    #[test]
+    fn retained_voice_survives_shrinking_loop_list() {
+        let mut engine = Engine::new(120.0, 48000);
+        let mut hat = ev(0, VoiceKind::Hat, 0, 50000);
+        hat.loop_name = "h".into();
+        hat.loop_index = 1;
+        engine.submit_swap(
+            tl(vec![hat], 0, vec![("b".into(), 0), ("h".into(), 0)], 2000),
+            1,
+        );
+        engine_step(&mut engine, 2000);
+        engine.submit_swap(tl(vec![], 1, vec![("h".into(), 0)], 2000), 2);
+        let out = engine_step(&mut engine, 2000);
+        assert!(
+            out[0..16].iter().any(|s| *s != 0.0),
+            "ringing h voice must survive when the loop list shrinks"
         );
     }
 }
