@@ -45,6 +45,8 @@ enum UiMsg {
     },
 }
 
+type PendingClaims = HashMap<u64, Vec<(u32, String, Arc<cymbal_audio::recorder::Recorder>)>>;
+
 fn next_loop_generations(
     current: &HashMap<String, u64>,
     loop_names: &[String],
@@ -95,6 +97,60 @@ fn handle_reloaded(
     } else {
         format!("reloaded: {}", changed.join(", "))
     };
+}
+
+fn is_stale(seq: u64, latest_seq: u64) -> bool {
+    seq < latest_seq
+}
+
+fn record_reload(recent: &mut Vec<(u64, Vec<String>)>, seq: u64, loops: Vec<String>) {
+    recent.push((seq, loops));
+    if recent.len() > 4 {
+        recent.remove(0);
+    }
+}
+
+fn resolve_claim(recent: &[(u64, Vec<String>)], seq: u64, loop_index: u32) -> Option<String> {
+    recent
+        .iter()
+        .rev()
+        .find(|(s, _)| *s == seq)
+        .and_then(|(_, loops)| loops.get(loop_index as usize))
+        .cloned()
+}
+
+fn drain_pending(
+    pending: &mut PendingClaims,
+    seq: u64,
+) -> Vec<(u32, String, Arc<cymbal_audio::recorder::Recorder>)> {
+    pending.remove(&seq).unwrap_or_default()
+}
+
+fn join_writers(writers: &mut Vec<std::thread::JoinHandle<()>>, deadline: Instant) {
+    for w in writers.drain(..) {
+        while !w.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+fn spawn_track_writer(
+    rec: &Arc<cymbal_audio::recorder::Recorder>,
+    name: &str,
+    ts: Option<&str>,
+    dir: Option<&std::path::Path>,
+    tx: &mpsc::Sender<UiMsg>,
+) -> std::thread::JoinHandle<()> {
+    let rec = rec.clone();
+    let ts = ts.expect("claim writer requires a recording timestamp");
+    let dir = dir.expect("claim writer requires a record directory");
+    let path = free_path(
+        dir,
+        &format!("recording-{ts}-{}", cymbal_core::wav::sanitize_name(name)),
+    );
+    let tx = tx.clone();
+    let start = Instant::now();
+    std::thread::spawn(move || record_loop(&rec, &path, &tx, start))
 }
 
 fn loop_names(src: &str) -> Result<Vec<String>, Error> {
@@ -528,6 +584,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut reload_seq: u64 = 1;
     let mut latest_seq: u64 = 0;
+    let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
+    let mut pending: PendingClaims = HashMap::new();
+    let mut record_ts: Option<String> = None;
+    let mut record_dir: Option<std::path::PathBuf> = None;
 
     let result = (|| -> io::Result<()> {
         loop {
@@ -553,12 +613,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 if queue.send(Msg::RecordStop).is_err() {
                                     status.set_error("recording queue full: stop failed".into());
                                 }
-                                let deadline = Instant::now() + Duration::from_secs(2);
-                                for w in record_writers.drain(..) {
-                                    while !w.is_finished() && Instant::now() < deadline {
-                                        std::thread::sleep(Duration::from_millis(10));
-                                    }
-                                }
+                                join_writers(
+                                    &mut record_writers,
+                                    Instant::now() + Duration::from_secs(5),
+                                );
                             }
                             break;
                         }
@@ -632,6 +690,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                         }));
                                     }
                                     record_writers = writers;
+                                    record_ts = Some(ts);
+                                    record_dir = Some(dir);
                                     status.recording = true;
                                     status.clear_error();
                                     status.message = "recording...".into();
@@ -641,6 +701,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 if queue.send(Msg::RecordStop).is_err() {
                                     status.set_error("recording queue full: stop failed".into());
                                 }
+                                record_ts = None;
+                                record_dir = None;
+                                join_writers(
+                                    &mut record_writers,
+                                    Instant::now() + Duration::from_secs(5),
+                                );
                                 status.recording = false;
                                 status.message = "stopping...".into();
                             }
@@ -757,23 +823,43 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         generations,
                         loops,
                         seq,
-                    } => handle_reloaded(
-                        &mut status,
-                        &mut latest_loops,
-                        &mut latest_seq,
-                        generations,
-                        loops,
-                        seq,
-                    ),
+                    } => {
+                        if seq > latest_seq {
+                            record_reload(&mut recent, seq, loops.clone());
+                        }
+                        handle_reloaded(
+                            &mut status,
+                            &mut latest_loops,
+                            &mut latest_seq,
+                            generations,
+                            loops,
+                            seq,
+                        );
+                        for (loop_index, _, rec) in drain_pending(&mut pending, seq) {
+                            if record_ts.is_some()
+                                && let Some(name) = resolve_claim(&recent, seq, loop_index)
+                            {
+                                record_writers.push(spawn_track_writer(
+                                    &rec,
+                                    &name,
+                                    record_ts.as_deref(),
+                                    record_dir.as_deref(),
+                                    &msg_tx,
+                                ));
+                            }
+                        }
+                    }
                     UiMsg::RecordError(s) => {
                         recording = false;
                         record_start = None;
-                        record_writers = Vec::new();
+                        record_ts = None;
+                        record_dir = None;
                         if queue.send(Msg::RecordStop).is_err() {
                             status.set_error(format!("{s} (recording queue full: stop failed)"));
                         } else {
                             status.set_error(s);
                         }
+                        join_writers(&mut record_writers, Instant::now() + Duration::from_secs(5));
                         status.recording = false;
                     }
                     m => apply_ui_msg(&mut status, m),
@@ -782,7 +868,35 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
             while let Some(ev) = ui_queue.try_pop() {
                 match ev {
                     cymbal_audio::ui_queue::UiEvent::Bar(n) => status.bar = n,
-                    cymbal_audio::ui_queue::UiEvent::TrackClaimed { .. } => {}
+                    cymbal_audio::ui_queue::UiEvent::TrackClaimed {
+                        rec,
+                        seq,
+                        loop_index,
+                    } => {
+                        if record_ts.is_none() {
+                            continue;
+                        }
+                        if is_stale(seq, latest_seq) {
+                            let _ = msg_tx.send(UiMsg::Err(Error::new(
+                                cymbal_core::error::Span { line: 0, col: 0 },
+                                cymbal_core::error::ErrorKind::Io,
+                                format!("stale mid-recording track claim (seq {seq})"),
+                            )));
+                        } else if let Some(name) = resolve_claim(&recent, seq, loop_index) {
+                            record_writers.push(spawn_track_writer(
+                                &rec,
+                                &name,
+                                record_ts.as_deref(),
+                                record_dir.as_deref(),
+                                &msg_tx,
+                            ));
+                        } else {
+                            pending
+                                .entry(seq)
+                                .or_default()
+                                .push((loop_index, String::new(), rec));
+                        }
+                    }
                 }
             }
             if recording && let Some(start) = record_start {
@@ -1401,5 +1515,110 @@ mod tests {
         assert_eq!(render, None);
         assert_eq!(tracks, None);
         assert_eq!(file, None);
+    }
+
+    #[test]
+    fn claim_resolution_uses_recent_reload_history() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(1, vec!["b".to_string()])];
+        let name = resolve_claim(&recent, 1, 0);
+        assert_eq!(name, Some("b".to_string()));
+        let name = resolve_claim(&recent, 1, 3);
+        assert_eq!(name, None, "index out of range");
+    }
+
+    #[test]
+    fn claim_history_bounded_to_four() {
+        let mut recent = Vec::new();
+        for seq in 1..=5 {
+            record_reload(&mut recent, seq, vec![format!("l{seq}")]);
+        }
+        assert_eq!(recent.len(), 4);
+        assert_eq!(recent.first().unwrap().0, 2, "oldest entry evicted");
+    }
+
+    #[test]
+    fn pending_claims_flush_on_matching_reload() {
+        let mut pending: PendingClaims = HashMap::new();
+        pending.insert(
+            3,
+            vec![(
+                0,
+                "claim".to_string(),
+                cymbal_audio::recorder::Recorder::new(4, 4),
+            )],
+        );
+        let flushed = drain_pending(&mut pending, 3);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!((flushed[0].0, flushed[0].1.as_str()), (0, "claim"));
+        assert!(pending.is_empty());
+        let stale = drain_pending(&mut pending, 4);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn claim_at_current_seq_is_not_stale() {
+        let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string(), "h".to_string()])];
+        let name = resolve_claim(&recent, 2, 1);
+        assert_eq!(name, Some("h".to_string()));
+        assert!(!is_stale(2, 2), "seq == latest_seq is not stale");
+        assert!(is_stale(1, 2), "only older-than-seen swaps are stale");
+    }
+
+    #[test]
+    fn join_writers_respects_the_shared_deadline() {
+        let fast = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(100)));
+        let slow = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(10)));
+        let mut writers = vec![fast, slow];
+        let deadline = Instant::now() + Duration::from_millis(300);
+        join_writers(&mut writers, deadline);
+        assert!(writers.is_empty(), "handles are consumed either way");
+    }
+
+    #[test]
+    fn join_writers_finishes_before_deadline_and_detaches_after() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let finished = Arc::new(AtomicBool::new(false));
+        let f1 = finished.clone();
+        let mut writers = vec![std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            f1.store(true, Ordering::Relaxed);
+        })];
+        join_writers(&mut writers, Instant::now() + Duration::from_secs(5));
+        assert!(writers.is_empty());
+        assert!(
+            finished.load(Ordering::Relaxed),
+            "a 1s writer finishes within a 5s deadline"
+        );
+        let detached = Arc::new(AtomicBool::new(false));
+        let d1 = detached.clone();
+        let mut writers = vec![std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(10));
+            d1.store(true, Ordering::Relaxed);
+        })];
+        join_writers(&mut writers, Instant::now() + Duration::from_millis(50));
+        assert!(writers.is_empty());
+        assert!(
+            !detached.load(Ordering::Relaxed),
+            "a 10s writer is detached after a 50ms deadline"
+        );
+    }
+
+    #[test]
+    fn spawn_track_writer_writes_claimed_loop_to_timestamped_file() {
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        let mut block = rec.take_pool_block();
+        block[..4].copy_from_slice(&[0.25, -0.25, 0.25, -0.25]);
+        rec.push_filled(block);
+        rec.stop();
+        let dir = std::env::temp_dir().join(format!("cymbal_claim_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = mpsc::channel::<UiMsg>();
+        let handle = spawn_track_writer(&rec, "beat 1", Some("20260804-153245"), Some(&dir), &tx);
+        handle.join().unwrap();
+        assert!(
+            dir.join("recording-20260804-153245-beat-1.wav").exists(),
+            "claimed loop written with the ts-name convention"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
