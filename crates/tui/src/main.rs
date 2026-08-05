@@ -767,11 +767,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                         KeyCode::Char('e') => {
                             let src = editor.content();
-                            let out_path = file
-                                .parent()
-                                .map(|p| p.join("out.wav"))
-                                .unwrap_or_else(|| std::path::PathBuf::from("out.wav"));
-                            let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                            let dir = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                            let out_path = free_path(&dir, "out");
+                            let base = dir;
                             let tx = msg_tx.clone();
                             std::thread::spawn(move || {
                                 match render_src(&src, &base, MAX_SAMPLES) {
@@ -1086,6 +1084,30 @@ mod tests {
         assert_eq!(bytes.len(), 48000 * 2 * 4 + 44, "1s stereo f32 wav length");
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn export_uses_collision_guard() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("cymbal_export_src_{}.cym", std::process::id()));
+        let mut f = std::fs::File::create(&src_path).unwrap();
+        write!(f, "let kick = kick()\nloop \"b\":\n    kick << \"x\"\n").unwrap();
+        let out_dir = dir.join(format!("cymbal_export_out_{}", std::process::id()));
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("out.wav"), b"occupied").unwrap();
+        render_to_wav(&src_path, &free_path(&out_dir, "out"), 1).unwrap();
+        assert!(
+            out_dir.join("out-2.wav").exists(),
+            "collision must pick out-2.wav"
+        );
+        assert_eq!(
+            std::fs::read(out_dir.join("out.wav")).unwrap(),
+            b"occupied",
+            "existing file untouched"
+        );
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_dir_all(&out_dir);
     }
 
     #[test]
