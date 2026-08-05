@@ -1500,20 +1500,26 @@ mod tests {
         let tl_b = tl(
             vec![ev(0, VoiceKind::Hat, 1, 2400)],
             1,
-            vec![("b".into(), 1)],
+            vec![("b".into(), 1), ("c".into(), 1)],
             24000,
         );
         let mut engine = Engine::new(120.0, 48000);
         let mut out = vec![0.0f32; 48000 * 2];
+        let midi = crate::midi_out::MidiOut::new(8192);
+        engine.set_midi(Some(midi.clone()));
+        let ui = UiQueue::new(64);
+        engine.set_ui(Some(ui.clone()));
         engine.submit_swap(tl_a, 1);
         engine.process(&mut out);
         let rec = Recorder::new(4, 4);
         let rec2 = Recorder::new(4, 4);
+        let spare = Recorder::new(4, 4);
         let tracks = vec![("b".into(), rec2.clone())];
+        let spares = vec![spare.clone()];
         engine.stop_recording();
         COUNTING.with(|c| c.set(true));
         ALLOCS.store(0, Ordering::SeqCst);
-        engine.start_recording(rec.clone(), tracks, vec![]);
+        engine.start_recording(rec.clone(), tracks, spares);
         engine.submit_swap(tl_b, 2);
         engine.process(&mut out);
         engine.stop_recording();
@@ -1531,7 +1537,8 @@ mod tests {
         );
         assert_eq!(
             count, 0,
-            "swap, triggers, recording taps, and swaps must not allocate"
+            "swap, triggers, clock pulses, bar and claimed-track events, and \
+             recording taps must not allocate"
         );
     }
 
