@@ -222,23 +222,27 @@ impl Engine {
     pub fn stop_recording(&mut self) {
         if let Some(state) = self.rec_state.take() {
             let pos = state.pos;
+            let mut cur = state.current;
             if pos > 0 {
-                let mut cur = state.current;
                 for s in &mut cur[pos * 2..] {
                     *s = 0.0;
                 }
                 state.rec.push_filled(cur);
+            } else {
+                state.rec.return_block(cur);
             }
             state.rec.stop();
         }
         for st in self.tracks.iter_mut().flatten() {
             let pos = st.pos;
+            let mut cur = std::mem::take(&mut st.current);
             if pos > 0 {
-                let mut cur = std::mem::take(&mut st.current);
                 for s in &mut cur[pos * 2..] {
                     *s = 0.0;
                 }
                 st.rec.push_filled(cur);
+            } else {
+                st.rec.return_block(cur);
             }
             st.rec.stop();
         }
@@ -329,6 +333,8 @@ impl Engine {
                                 *s = 0.0;
                             }
                             st.rec.push_filled(st.current);
+                        } else {
+                            st.rec.return_block(st.current);
                         }
                         st.rec.stop();
                     }
@@ -1068,6 +1074,44 @@ mod tests {
         let b = rec_h.take_filled().unwrap();
         assert!(b[..6].iter().any(|s| *s != 0.0), "partial track flushed");
         assert_eq!(&b[6..], &[0.0, 0.0], "unfilled tail zeroed");
+    }
+
+    #[test]
+    fn stop_recording_returns_inflight_blocks_to_pool() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(vec![], 0, vec![("h".into(), 0)], 3), 1);
+        let master = Recorder::new(4, 4);
+        let rec_h = Recorder::new(4, 4);
+        let master_before = master.pool_len();
+        let track_before = rec_h.pool_len();
+        engine.start_recording(master.clone(), vec![("h".into(), rec_h.clone())]);
+        engine.stop_recording();
+        assert_eq!(
+            master.pool_len(),
+            master_before,
+            "master in-flight block returned to the pool"
+        );
+        assert_eq!(
+            rec_h.pool_len(),
+            track_before,
+            "track in-flight block returned to the pool"
+        );
+    }
+
+    #[test]
+    fn removed_loop_recorder_returns_empty_inflight_block() {
+        let mut engine = Engine::new(120.0, 48000);
+        engine.submit_swap(tl(vec![], 0, vec![("h".into(), 0)], 3), 1);
+        let rec_h = Recorder::new(4, 4);
+        let before = rec_h.pool_len();
+        engine.start_recording(Recorder::new(4, 4), vec![("h".into(), rec_h.clone())]);
+        engine.submit_swap(tl(vec![], 1, vec![], 3), 2);
+        engine_step(&mut engine, 1);
+        assert_eq!(
+            rec_h.pool_len(),
+            before,
+            "empty in-flight block returned on loop removal"
+        );
     }
 
     #[test]
