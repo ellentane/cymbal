@@ -1228,21 +1228,22 @@ mod tests {
 
     #[test]
     fn changed_loop_is_cut_after_reorder() {
-        // loop "a" gen 0 sounding; swap reorders to ["c", "a"] with "a" gen 1 —
-        // the old gen-0 voice must be cut at the boundary.
+        // loop "a" gen 0 sounding; swap reorders to ["c", "a"] with "a" gen 1
+        // and no events — the boundary lands inside the voice's audible tail,
+        // so silence can only mean the gen-0 voice was actually cut.
         let mut engine = Engine::new(120.0, 48000);
         engine.submit_swap(
             tl(
                 vec![ev(0, VoiceKind::Bass, 0, 50000)],
                 0,
                 vec![("a".into(), 0)],
-                24000,
+                2000,
             ),
             1,
         );
-        engine_step(&mut engine, 24000);
+        engine_step(&mut engine, 2000);
         engine.submit_swap(
-            tl(vec![], 1, vec![("c".into(), 0), ("a".into(), 1)], 24000),
+            tl(vec![], 1, vec![("c".into(), 0), ("a".into(), 1)], 2000),
             2,
         );
         let out = engine_step(&mut engine, 4800);
