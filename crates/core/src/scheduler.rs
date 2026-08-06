@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn events_are_sorted_and_clamped() {
-        // lead [c4, e4, f2, c2] >> rev: 4 steps -> step_samples 24000;
+        // lead [c4, e4, f2, c2] | rev: 4 steps -> step_samples 24000;
         // offsets [0, 24000, 48000, 72000] -> clamped < 40000 -> [0, 24000];
         // rev reverses pitches: [c2, f2, e4, c4] = [36, 41, 64, 60]
         let tl = src2timeline(
