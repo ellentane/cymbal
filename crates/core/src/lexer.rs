@@ -135,7 +135,7 @@ impl Lexer {
                         return self.lex_number(span);
                     } else {
                         return Err(Error::new(span, ErrorKind::Lex, "unexpected character '-'")
-                            .with_hint("glyphs are quoted in help topics: help \".\""));
+                            .with_hint("glyphs are quoted in help topics: help \"-\""));
                     }
                 }
                 '"' => return self.lex_string(span),

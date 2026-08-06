@@ -944,6 +944,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                         _ => {}
                     }
+                } else if help_open {
+                    // panel is open: swallow every remaining key
+                    completion = None;
                 } else if k.modifiers.contains(KeyModifiers::ALT) {
                     completion = None;
                     if let Some(kind) = alt_transform_kind(k.code) {
