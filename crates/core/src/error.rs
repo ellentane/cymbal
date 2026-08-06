@@ -18,6 +18,7 @@ pub struct Error {
     pub span: Span,
     pub kind: ErrorKind,
     pub message: String,
+    pub hint: Option<String>,
 }
 
 impl Error {
@@ -26,7 +27,13 @@ impl Error {
             span,
             kind,
             message: message.into(),
+            hint: None,
         }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 }
 
@@ -43,7 +50,11 @@ impl std::fmt::Display for Error {
             f,
             "line {}, col {}: {}: {}",
             self.span.line, self.span.col, kind, self.message
-        )
+        )?;
+        if let Some(hint) = &self.hint {
+            write!(f, " (hint: {hint})")?;
+        }
+        Ok(())
     }
 }
 
@@ -66,5 +77,21 @@ mod tests {
             e.to_string(),
             "line 2, col 7: parse error: unexpected token"
         );
+    }
+
+    #[test]
+    fn error_displays_hint() {
+        let e = Error::new(Span { line: 1, col: 3 }, ErrorKind::Lex, "bad")
+            .with_hint("use '|'");
+        assert_eq!(
+            e.to_string(),
+            "line 1, col 3: lex error: bad (hint: use '|')"
+        );
+    }
+
+    #[test]
+    fn error_without_hint_displays_unchanged() {
+        let e = Error::new(Span { line: 2, col: 7 }, ErrorKind::Parse, "boom");
+        assert_eq!(e.to_string(), "line 2, col 7: parse error: boom");
     }
 }
