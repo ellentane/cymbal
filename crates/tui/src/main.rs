@@ -425,10 +425,11 @@ type ParsedArgs<'a> = (
     Option<(&'a str, &'a str, Option<&'a str>, bool)>,
     Option<(&'a str, &'a str)>,
     Option<&'a str>,
+    bool, // docs
 );
 
 fn parse_args(args: &[String]) -> ParsedArgs<'_> {
-    // returns (midi_port, render args (input, output, seconds), tracks args (input, outdir), tui file)
+    // returns (midi_port, render args (input, output, seconds), tracks args (input, outdir), tui file, docs)
     let mut it = args.iter().map(String::as_str);
     let first = it.next();
     match first {
@@ -443,50 +444,71 @@ fn parse_args(args: &[String]) -> ParsedArgs<'_> {
                 Some(&p) => (Some(p.to_string()), rest[1..].to_vec()),
             };
             match rest.as_slice() {
-                ["render", input, output] => (port, Some((input, output, None, false)), None, None),
-                ["render", "--tracks", input, outdir] => (port, None, Some((input, outdir)), None),
+                ["render", input, output] => {
+                    (port, Some((input, output, None, false)), None, None, false)
+                }
+                ["render", "--tracks", input, outdir] => {
+                    (port, None, Some((input, outdir)), None, false)
+                }
                 ["render", "--f32", input, output] => {
-                    (port, Some((input, output, None, true)), None, None)
+                    (port, Some((input, output, None, true)), None, None, false)
                 }
-                ["render", "--f32", input, output, seconds] => {
-                    (port, Some((input, output, Some(seconds), true)), None, None)
-                }
+                ["render", "--f32", input, output, seconds] => (
+                    port,
+                    Some((input, output, Some(seconds), true)),
+                    None,
+                    None,
+                    false,
+                ),
                 ["render", input, output, seconds] => (
                     port,
                     Some((input, output, Some(seconds), false)),
                     None,
                     None,
+                    false,
                 ),
-                [file] => (port, None, None, Some(file)),
-                _ => (port, None, None, None),
+                [file] => (port, None, None, Some(file), false),
+                _ => (port, None, None, None, false),
             }
         }
         Some("render") => {
             let rest: Vec<&str> = it.collect();
             match rest.as_slice() {
-                [input, output] => (None, Some((input, output, None, false)), None, None),
-                ["--tracks", input, outdir] => (None, None, Some((input, outdir)), None),
-                ["--f32", input, output] => (None, Some((input, output, None, true)), None, None),
-                ["--f32", input, output, seconds] => {
-                    (None, Some((input, output, Some(seconds), true)), None, None)
+                [input, output] => (None, Some((input, output, None, false)), None, None, false),
+                ["--tracks", input, outdir] => (None, None, Some((input, outdir)), None, false),
+                ["--f32", input, output] => {
+                    (None, Some((input, output, None, true)), None, None, false)
                 }
+                ["--f32", input, output, seconds] => (
+                    None,
+                    Some((input, output, Some(seconds), true)),
+                    None,
+                    None,
+                    false,
+                ),
                 [input, output, seconds] => (
                     None,
                     Some((input, output, Some(seconds), false)),
                     None,
                     None,
+                    false,
                 ),
-                _ => (None, None, None, None),
+                _ => (None, None, None, None, false),
             }
         }
-        Some(file) => (None, None, None, Some(file)),
-        None => (None, None, None, None),
+        Some("docs") => (None, None, None, None, true),
+        Some(file) => (None, None, None, Some(file), false),
+        None => (None, None, None, None, false),
     }
 }
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (midi_port, render, tracks, tui_file) = parse_args(&args);
+    let (midi_port, render, tracks, tui_file, docs) = parse_args(&args);
+    if docs {
+        print!("{}", cymbal_core::docs::markdown());
+        return std::process::ExitCode::SUCCESS;
+    }
     if let Some((input, output, seconds, f32)) = render {
         let seconds = match seconds {
             None => RENDER_DEFAULT_SECONDS,
@@ -542,7 +564,7 @@ fn main() -> std::process::ExitCode {
         };
     }
     eprintln!(
-        "usage: cymbal [--midi [port]] <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]\n       cymbal render --tracks <in.cym> <outdir>"
+        "usage: cymbal [--midi [port]] <file.cym>\n       cymbal render <in.cym> <out.wav> [seconds]\n       cymbal render --f32 <in.cym> <out.wav> [seconds]\n       cymbal render --tracks <in.cym> <outdir>\n       cymbal docs"
     );
     std::process::ExitCode::from(2)
 }
@@ -1472,7 +1494,7 @@ mod tests {
     #[test]
     fn parse_args_single_file() {
         let args = vec!["a.cym".to_string()];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, None);
         assert_eq!(tracks, None);
@@ -1482,7 +1504,7 @@ mod tests {
     #[test]
     fn parse_args_midi_file_uses_first_port() {
         let args = vec!["--midi".to_string(), "a.cym".to_string()];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, Some(String::new()));
         assert_eq!(render, None);
         assert_eq!(tracks, None);
@@ -1496,7 +1518,7 @@ mod tests {
             "UM-1".to_string(),
             "a.cym".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, Some("UM-1".to_string()));
         assert_eq!(render, None);
         assert_eq!(tracks, None);
@@ -1511,7 +1533,7 @@ mod tests {
             "in.cym".to_string(),
             "out.wav".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, Some(String::new()));
         assert_eq!(render, Some(("in.cym", "out.wav", None, false)));
         assert_eq!(tracks, None);
@@ -1527,7 +1549,7 @@ mod tests {
             "out.wav".to_string(),
             "30".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, Some(String::new()));
         assert_eq!(render, Some(("in.cym", "out.wav", Some("30"), false)));
         assert_eq!(tracks, None);
@@ -1541,7 +1563,7 @@ mod tests {
             "in.cym".to_string(),
             "out.wav".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", None, false)));
         assert_eq!(tracks, None);
@@ -1556,7 +1578,7 @@ mod tests {
             "in.cym".to_string(),
             "out.wav".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", None, true)));
         assert_eq!(tracks, None);
@@ -1572,7 +1594,7 @@ mod tests {
             "out.wav".to_string(),
             "5".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", Some("5"), true)));
         assert_eq!(tracks, None);
@@ -1587,7 +1609,7 @@ mod tests {
             "out.wav".to_string(),
             "5".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, Some(("in.cym", "out.wav", Some("5"), false)));
         assert_eq!(tracks, None);
@@ -1602,7 +1624,7 @@ mod tests {
             "in.cym".to_string(),
             "outdir".to_string(),
         ];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, None);
         assert_eq!(tracks, Some(("in.cym", "outdir")));
@@ -1612,11 +1634,25 @@ mod tests {
     #[test]
     fn parse_args_garbage_is_all_none() {
         let args = vec!["render".to_string(), "in.cym".to_string()];
-        let (midi, render, tracks, file) = parse_args(&args);
+        let (midi, render, tracks, file, _docs) = parse_args(&args);
         assert_eq!(midi, None);
         assert_eq!(render, None);
         assert_eq!(tracks, None);
         assert_eq!(file, None);
+    }
+
+    #[test]
+    fn parse_args_accepts_docs() {
+        let args = vec!["docs".to_string()];
+        let (_, _, _, _, docs) = parse_args(&args);
+        assert!(docs);
+    }
+
+    #[test]
+    fn parse_args_defaults_docs_false() {
+        let args = vec!["beat.cym".to_string()];
+        let (_, _, _, _, docs) = parse_args(&args);
+        assert!(!docs);
     }
 
     #[test]
