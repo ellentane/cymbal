@@ -202,6 +202,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     Stmt::Tempo(n, span)
                 }
+                TokenKind::Help => self.parse_help()?,
                 _ => {
                     return Err(Error::new(
                         self.span(),
@@ -233,6 +234,36 @@ impl<'a> Parser<'a> {
         self.advance();
         let value = self.parse_expr()?;
         Ok(Stmt::Let { name, value, span })
+    }
+
+    fn parse_help(&mut self) -> Result<Stmt> {
+        let span = self.span();
+        self.advance(); // help
+        let topic = match self.peek_kind().clone() {
+            TokenKind::Ident(name) | TokenKind::String(name) => {
+                self.advance();
+                Some(name)
+            }
+            TokenKind::Rev => { self.advance(); Some("rev".to_string()) }
+            TokenKind::Every => { self.advance(); Some("every".to_string()) }
+            TokenKind::Let => { self.advance(); Some("let".to_string()) }
+            TokenKind::Loop => { self.advance(); Some("loop".to_string()) }
+            TokenKind::Tempo => { self.advance(); Some("tempo".to_string()) }
+            TokenKind::Help => { self.advance(); Some("help".to_string()) }
+            TokenKind::Pipe => { self.advance(); Some("|".to_string()) }
+            TokenKind::Bind => { self.advance(); Some("<<".to_string()) }
+            TokenKind::DotDot => { self.advance(); Some("..".to_string()) }
+            TokenKind::Newline | TokenKind::Eof => None,
+            _ => {
+                return Err(Error::new(
+                    self.span(),
+                    ErrorKind::Parse,
+                    "expected a help topic",
+                )
+                .with_hint("write help pan, help rev, help |, or quote glyphs: help \"*\""));
+            }
+        };
+        Ok(Stmt::Help(topic, span))
     }
 
     fn parse_loop(&mut self) -> Result<LoopStmt> {
@@ -774,6 +805,35 @@ loop "beat" tempo=90:
     #[test]
     fn bind_outside_loop_is_parse_error() {
         let err = parse(&lex("kick << \"x\"\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn parses_help_statements() {
+        let program = parse(&lex("help pan\nhelp\nhelp rev\nhelp |\nhelp <<\nhelp \"*\"\n").unwrap()).unwrap();
+        assert_eq!(
+            program.statements,
+            vec![
+                Stmt::Help(Some("pan".into()), Span { line: 1, col: 1 }),
+                Stmt::Help(None, Span { line: 2, col: 1 }),
+                Stmt::Help(Some("rev".into()), Span { line: 3, col: 1 }),
+                Stmt::Help(Some("|".into()), Span { line: 4, col: 1 }),
+                Stmt::Help(Some("<<".into()), Span { line: 5, col: 1 }),
+                Stmt::Help(Some("*".into()), Span { line: 6, col: 1 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn help_with_invalid_topic_is_an_error() {
+        let err = parse(&lex("help 5\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
+    fn help_inside_loop_body_is_an_error() {
+        let err = parse(&lex("loop \"a\":\n    help pan\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
     }
 

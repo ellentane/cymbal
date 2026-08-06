@@ -38,6 +38,7 @@ enum UiMsg {
     Err(Error),
     Info(String),
     RecordError(String),
+    Help(String),
     Reloaded {
         generations: HashMap<String, u64>,
         loops: Vec<String>,
@@ -255,6 +256,9 @@ fn render_to_wav_with(
     let base = input.parent().unwrap_or_else(|| std::path::Path::new("."));
     let samples_out =
         render_src(&src, base, max_samples).map_err(|e| format!("render failed: {e}"))?;
+    if let Some(text) = cymbal_core::docs::help_text_src(&src) {
+        eprintln!("{text}");
+    }
     let mut w = cymbal_core::wav::WavWriter::create_with_format(output, SAMPLE_RATE, 2, format)
         .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
     w.write_interleaved(&samples_out)
@@ -389,6 +393,9 @@ fn spawn_reload(
                         loops: names,
                         seq,
                     });
+                    if let Some(text) = cymbal_core::docs::help_text_src(&src) {
+                        let _ = msg_tx.send(UiMsg::Help(text));
+                    }
                     let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
                 }
                 Err(e) => {
@@ -632,6 +639,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut editor = Editor::new(src);
 
     let mut recording = false;
+    let mut help_open = false;
+    let mut help_scroll = 0u16;
+    let mut help_override: Option<String> = None;
     let mut midi_sending = false;
     let mut record_start: Option<Instant> = None;
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -923,6 +933,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                         join_writers(&mut record_writers, Instant::now() + Duration::from_secs(5));
                         status.recording = false;
+                    }
+                    UiMsg::Help(text) => {
+                        help_override = Some(text);
+                        help_open = true;
                     }
                     m => apply_ui_msg(&mut status, m),
                 }

@@ -12,7 +12,7 @@ pub enum Class {
 
 pub fn classify(kind: &TokenKind) -> Class {
     match kind {
-        TokenKind::Let | TokenKind::Loop | TokenKind::Tempo | TokenKind::Rev | TokenKind::Every => {
+        TokenKind::Let | TokenKind::Loop | TokenKind::Tempo | TokenKind::Rev | TokenKind::Every | TokenKind::Help => {
             Class::Keyword
         }
         TokenKind::Ident(s) if s == "sample" => Class::Keyword,
@@ -65,6 +65,7 @@ fn token_text(t: &cymbal_core::lexer::Token) -> String {
         TokenKind::Tempo => "tempo".into(),
         TokenKind::Rev => "rev".into(),
         TokenKind::Every => "every".into(),
+        TokenKind::Help => "help".into(),
         TokenKind::LParen => "(".into(),
         TokenKind::RParen => ")".into(),
         TokenKind::LBracket => "[".into(),

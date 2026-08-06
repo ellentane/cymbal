@@ -11,6 +11,7 @@ pub enum TokenKind {
     Tempo,
     Rev,
     Every,
+    Help,
     LParen,
     RParen,
     LBracket,
@@ -228,11 +229,20 @@ impl Lexer {
                 'a'..='g' => return self.lex_alpha(span),
                 _ if c.is_ascii_alphabetic() => return self.lex_ident(span),
                 _ => {
-                    return Err(Error::new(
+                    let hint = matches!(
+                        c,
+                        '.' | '*' | '=' | ',' | '+' | '-' | '[' | ']'
+                    )
+                    .then(|| "glyphs are quoted in help topics: help \".\"");
+                    let mut err = Error::new(
                         span,
                         ErrorKind::Lex,
                         format!("unexpected character '{c}'"),
-                    ));
+                    );
+                    if let Some(h) = hint {
+                        err = err.with_hint(h);
+                    }
+                    return Err(err);
                 }
             }
         }
@@ -329,6 +339,7 @@ impl Lexer {
             "tempo" => TokenKind::Tempo,
             "rev" => TokenKind::Rev,
             "every" => TokenKind::Every,
+            "help" => TokenKind::Help,
             _ => TokenKind::Ident(s),
         };
         Ok(Token { kind, span })
