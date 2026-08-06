@@ -196,6 +196,11 @@ pub fn bar_triggers(pattern: &Expr, default_pitch: u8) -> Result<(usize, Vec<Opt
             ErrorKind::Eval,
             "expected a pattern, got a sample voice",
         )),
+        Expr::Name(name, span) => Err(Error::new(
+            *span,
+            ErrorKind::Eval,
+            format!("unresolved voice name '{name}'"),
+        )),
     }
 }
 

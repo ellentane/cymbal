@@ -23,6 +23,7 @@ pub enum Expr {
     Notes(Vec<Note>, Span),
     Tuple(Vec<Note>, String, Span),
     Sample(String, Span),
+    Name(String, Span),
 }
 
 #[derive(Debug, Clone, PartialEq)]

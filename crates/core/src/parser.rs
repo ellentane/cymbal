@@ -11,12 +11,113 @@ fn param_range(p: Option<Param>, lo: f32, hi: f32) -> bool {
     }
 }
 
+fn builtin_voice(name: &str) -> Option<VoiceKind> {
+    match name {
+        "kick" => Some(VoiceKind::Kick),
+        "snare" => Some(VoiceKind::Snare),
+        "hat" => Some(VoiceKind::Hat),
+        "bass" => Some(VoiceKind::Bass),
+        "lead" => Some(VoiceKind::Lead),
+        _ => None,
+    }
+}
+
 pub fn parse(tokens: &[Token]) -> Result<Program> {
     debug_assert!(
         !tokens.is_empty(),
         "parse requires lexer output ending in Eof"
     );
-    Parser { tokens, pos: 0 }.parse_program()
+    let program = Parser { tokens, pos: 0 }.parse_program()?;
+    resolve_names(program)
+}
+
+fn resolve_names(program: Program) -> Result<Program> {
+    use std::collections::HashMap;
+    let mut raw: HashMap<String, Expr> = HashMap::new();
+    for stmt in &program.statements {
+        if let Stmt::Let { name, value, .. } = stmt {
+            raw.insert(name.clone(), value.clone());
+        }
+    }
+    let candidates: Vec<&str> = VOICE_NAMES
+        .iter()
+        .copied()
+        .chain(raw.keys().map(|s| s.as_str()))
+        .collect();
+
+    fn resolve_one(
+        name: &str,
+        raw: &HashMap<String, Expr>,
+        candidates: &[&str],
+        stack: &mut Vec<String>,
+    ) -> Result<Expr> {
+        match raw.get(name) {
+            Some(Expr::Name(inner, span)) => {
+                if stack.contains(&name.to_string()) {
+                    return Err(Error::new(
+                        *span,
+                        ErrorKind::Parse,
+                        format!("cycle in let names: {}", stack.join(" -> ")),
+                    ));
+                }
+                stack.push(name.to_string());
+                let r = resolve_one(inner, raw, candidates, stack);
+                stack.pop();
+                r
+            }
+            Some(other) => Ok(other.clone()),
+            None => match builtin_voice(name) {
+                Some(kind) => Ok(Expr::Voice(kind, Span { line: 1, col: 1 })),
+                None => Err(Error::new(
+                    Span { line: 1, col: 1 },
+                    ErrorKind::Parse,
+                    format!("unknown voice '{name}'"),
+                )
+                .with_hint(
+                    nearest(candidates, name)
+                        .map(|n| format!("did you mean '{n}'?"))
+                        .unwrap_or_else(|| "declare it with let, e.g. let kick = kick()".to_string()),
+                )),
+            },
+        }
+    }
+
+    for name in raw.keys() {
+        resolve_one(name, &raw, &candidates, &mut Vec::new())?;
+    }
+
+    let mut statements = Vec::new();
+    for stmt in program.statements {
+        match stmt {
+            Stmt::Loop(mut l) => {
+                for bind in &mut l.binds {
+                    if let Expr::Name(n, span) = &bind.voice {
+                        let n = n.clone();
+                        let span = *span;
+                        bind.voice = match resolve_one(&n, &raw, &candidates, &mut Vec::new())
+                        {
+                            Ok(e) => e,
+                            Err(mut e) => {
+                                e.span = span;
+                                return Err(e);
+                            }
+                        };
+                    }
+                    if let Expr::Name(n, span) = &bind.pattern {
+                        return Err(Error::new(
+                            *span,
+                            ErrorKind::Parse,
+                            format!("'{n}' is not a pattern"),
+                        )
+                        .with_hint("patterns are quoted strings or note arrays: kick << \"x\" or [c4, e4]"));
+                    }
+                }
+                statements.push(Stmt::Loop(l));
+            }
+            other => statements.push(other),
+        }
+    }
+    Ok(Program { statements })
 }
 
 struct Parser<'a> {
@@ -128,7 +229,12 @@ impl<'a> Parser<'a> {
             return Err(Error::new(self.span(), ErrorKind::Parse, "expected '='"));
         }
         self.advance();
-        let value = self.parse_expr()?;
+        let mut value = self.parse_expr()?;
+        if let Expr::Name(n, nspan) = &value
+            && let Some(kind) = builtin_voice(n)
+        {
+            value = Expr::Voice(kind, *nspan);
+        }
         Ok(Stmt::Let { name, value, span })
     }
 
@@ -205,6 +311,16 @@ impl<'a> Parser<'a> {
                 "a note array can't be a voice",
             )
             .with_hint("notes come first after '<<': lead << [c2, f2] \"x . x .\""));
+        }
+        if matches!(voice, Expr::Name(..))
+            && matches!(self.peek_kind(), TokenKind::String(_))
+        {
+            return Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "expected '<<'",
+            )
+            .with_hint("did you mean 'sample'? write sample \"path\" <<"));
         }
         if self.peek_kind() != &TokenKind::Bind {
             return Err(Error::new(self.span(), ErrorKind::Parse, "expected '<<'"));
@@ -445,7 +561,8 @@ impl<'a> Parser<'a> {
                             self.span(),
                             ErrorKind::Parse,
                             "expected path string after 'sample'",
-                        ));
+                        )
+                        .with_hint("'sample' is reserved: sample \"kick\""));
                     };
                     self.advance();
                     if path.starts_with('/') || path.split('/').any(|c| c == "..") {
@@ -463,29 +580,34 @@ impl<'a> Parser<'a> {
                         return Err(Error::new(self.span(), ErrorKind::Parse, "expected ')'"));
                     }
                     self.advance();
-                }
-                let kind = match name.as_str() {
-                    "kick" => VoiceKind::Kick,
-                    "snare" => VoiceKind::Snare,
-                    "hat" => VoiceKind::Hat,
-                    "bass" => VoiceKind::Bass,
-                    "lead" => VoiceKind::Lead,
-                    other => {
-                        let is_param = self.peek_kind() == &TokenKind::Assign;
-                        let candidates = if is_param { PARAM_NAMES } else { VOICE_NAMES };
-                        let msg = if is_param {
-                            format!("unknown parameter '{other}'")
-                        } else {
-                            format!("unknown voice '{other}'")
-                        };
-                        let mut err = Error::new(span, ErrorKind::Parse, msg);
-                        if let Some(close) = nearest(candidates, other) {
-                            err = err.with_hint(format!("did you mean '{close}'?"));
+                    let kind = match name.as_str() {
+                        "kick" => VoiceKind::Kick,
+                        "snare" => VoiceKind::Snare,
+                        "hat" => VoiceKind::Hat,
+                        "bass" => VoiceKind::Bass,
+                        "lead" => VoiceKind::Lead,
+                        other => {
+                            return Err(Error::new(
+                                span,
+                                ErrorKind::Parse,
+                                format!("unknown voice '{other}'"),
+                            ));
                         }
-                        return Err(err);
+                    };
+                    return Ok(Expr::Voice(kind, span));
+                }
+                if self.peek_kind() == &TokenKind::Assign {
+                    let mut err = Error::new(
+                        span,
+                        ErrorKind::Parse,
+                        format!("unknown parameter '{name}'"),
+                    );
+                    if let Some(close) = nearest(PARAM_NAMES, &name) {
+                        err = err.with_hint(format!("did you mean '{close}'?"));
                     }
-                };
-                Ok(Expr::Voice(kind, span))
+                    return Err(err);
+                }
+                Ok(Expr::Name(name, span))
             }
             TokenKind::String(s) => {
                 self.advance();
@@ -950,6 +1072,119 @@ loop "beat" tempo=90:
         assert_eq!(b.end, Some(Param::Const(0.75)));
         assert_eq!(b.dur, Some(Param::Const(0.2)));
         assert_eq!(b.cycle, Some(Param::Const(1.0)));
+    }
+
+    #[test]
+    fn let_names_resolve_to_sample_voices() {
+        let src = "let clap = sample \"clap\"\nloop \"a\":\n    clap << \"x . x .\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[1] else {
+            panic!()
+        };
+        assert_eq!(
+            l.binds[0].voice,
+            Expr::Sample("clap".into(), Span { line: 1, col: 12 })
+        );
+    }
+
+    #[test]
+    fn let_names_resolve_to_builtin_voices() {
+        let src = "let k = kick()\nloop \"a\":\n    k << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[1] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].voice, Expr::Voice(VoiceKind::Kick, _)));
+    }
+
+    #[test]
+    fn declared_names_win_over_builtins() {
+        let src = "let kick = lead()\nloop \"a\":\n    kick << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[1] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].voice, Expr::Voice(VoiceKind::Lead, _)));
+    }
+
+    #[test]
+    fn let_chains_resolve() {
+        let src = "let a = b\nlet b = kick()\nloop \"l\":\n    a << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[2] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].voice, Expr::Voice(VoiceKind::Kick, _)));
+    }
+
+    #[test]
+    fn let_cycles_are_errors() {
+        let src = "let a = b\nlet b = a\nloop \"l\":\n    a << \"x\"\n";
+        let err = parse(&lex(src).unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.message.contains("cycle"));
+    }
+
+    #[test]
+    fn unused_cycles_are_errors() {
+        let src = "let a = b\nlet b = a\n";
+        let err = parse(&lex(src).unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.message.contains("cycle"));
+    }
+
+    #[test]
+    fn redeclaration_last_wins() {
+        let src = "let a = kick()\nlet a = lead()\nloop \"l\":\n    a << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[2] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].voice, Expr::Voice(VoiceKind::Lead, _)));
+    }
+
+    #[test]
+    fn unknown_let_name_suggests_closest() {
+        let err = parse(&lex("let a = kick()\nloop \"l\":\n    q << \"x\"\n").unwrap()).unwrap_err();
+        assert!(err.message.contains("q"));
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
+    fn declared_names_suggest_typos() {
+        let src = "let kik = kick()\nloop \"l\":\n    kix << \"x\"\n";
+        let err = parse(&lex(src).unwrap()).unwrap_err();
+        assert!(err.hint.as_deref().unwrap().contains("kik"));
+    }
+
+    #[test]
+    fn param_typos_still_hint_after_let_resolution() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" vol=0.9\n").unwrap()).unwrap_err();
+        assert!(err.message.contains("vol"));
+        assert!(err.hint.as_deref().unwrap().contains("vel"));
+    }
+
+    #[test]
+    fn pattern_slot_names_error_with_hint() {
+        let err = parse(&lex("loop \"a\":\n    kick << smaple\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
+    fn bare_builtin_name_in_bind_still_works() {
+        let src = "loop \"a\":\n    kick << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].voice, Expr::Voice(VoiceKind::Kick, _)));
+    }
+
+    #[test]
+    fn sample_typo_before_string_hints() {
+        let err = parse(&lex("loop \"a\":\n    smaple \"x\" << \"x . x .\"\n").unwrap()).unwrap_err();
+        assert!(err.hint.is_some());
     }
 
     #[test]
