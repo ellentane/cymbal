@@ -503,6 +503,84 @@ fn parse_args(args: &[String]) -> ParsedArgs<'_> {
     }
 }
 
+const COMPLETION_KEYWORDS: &[&str] = &[
+    "let", "loop", "tempo", "sample", "help", "rev", "every(",
+];
+
+fn note_names() -> Vec<String> {
+    let mut out = Vec::new();
+    for oct in 2..=5 {
+        for letter in ['c', 'd', 'e', 'f', 'g', 'a', 'b'] {
+            for acc in ["", "#", "b"] {
+                out.push(format!("{letter}{acc}{oct}"));
+            }
+        }
+    }
+    out
+}
+
+fn completion_candidates(prefix: &str, let_names: &[String]) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |w: &str| {
+        if w.starts_with(prefix) {
+            out.push(w.to_string());
+        }
+    };
+    for w in COMPLETION_KEYWORDS {
+        push(w);
+    }
+    for w in cymbal_core::docs::PARAM_NAMES {
+        push(w);
+    }
+    for w in note_names() {
+        push(&w);
+    }
+    for w in cymbal_core::docs::VOICE_NAMES {
+        push(w);
+    }
+    for w in let_names {
+        if w.starts_with(prefix) {
+            out.push(w.clone());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn word_prefix(line: &str, col: usize) -> Option<String> {
+    let byte_idx = line
+        .char_indices()
+        .nth(col)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    let before = &line[..byte_idx];
+    let start = before
+        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '#')
+        .map_or(0, |i| i + 1);
+    let word = &before[start..];
+    if word.is_empty() { None } else { Some(word.to_string()) }
+}
+
+fn voice_names(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("let ")
+            && let Some(name) = rest.split('=').next()
+        {
+            let name = name.trim();
+            if !name.is_empty() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (midi_port, render, tracks, tui_file, docs) = parse_args(&args);
@@ -665,6 +743,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut help_open = false;
     let mut help_override: Option<String> = None;
     let mut help_scroll = 0u16;
+    let mut completion: Option<(Vec<String>, usize)> = None;
     let mut midi_sending = false;
     let mut record_start: Option<Instant> = None;
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -908,15 +987,64 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         KeyCode::Enter if help_open => {}
                         KeyCode::Backspace if help_open => {}
                         KeyCode::Tab if help_open => {}
-                        KeyCode::Char(c) => editor.insert_char(c),
-                        KeyCode::Backspace => editor.backspace(),
-                        KeyCode::Enter => editor.newline(),
-                        KeyCode::Left => editor.move_left(),
-                        KeyCode::Right => editor.move_right(),
-                        KeyCode::Up => editor.move_up(),
-                        KeyCode::Down => editor.move_down(),
-                        KeyCode::Home => editor.move_home(),
-                        KeyCode::End => editor.move_end(),
+                        KeyCode::Tab => {
+                            if let Some((cands, idx)) = &mut completion {
+                                *idx = (*idx + 1) % cands.len();
+                            } else {
+                                let (col, line_idx) = editor.cursor();
+                                let line = editor.lines()[line_idx].clone();
+                                let prefix = word_prefix(&line, col);
+                                let cands = prefix
+                                    .map(|p| completion_candidates(&p, &voice_names(&editor.content())))
+                                    .unwrap_or_default();
+                                if !cands.is_empty() {
+                                    completion = Some((cands, 0));
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some((cands, idx)) = completion.take() {
+                                if let Some(word) = cands.get(idx) {
+                                    editor.delete_word_before_cursor();
+                                    editor.insert_str(word);
+                                }
+                            } else {
+                                editor.newline();
+                            }
+                        }
+                        KeyCode::Esc => completion = None,
+                        KeyCode::Backspace => {
+                            completion = None;
+                            editor.backspace();
+                        }
+                        KeyCode::Left => {
+                            completion = None;
+                            editor.move_left();
+                        }
+                        KeyCode::Right => {
+                            completion = None;
+                            editor.move_right();
+                        }
+                        KeyCode::Up => {
+                            completion = None;
+                            editor.move_up();
+                        }
+                        KeyCode::Down => {
+                            completion = None;
+                            editor.move_down();
+                        }
+                        KeyCode::Home => {
+                            completion = None;
+                            editor.move_home();
+                        }
+                        KeyCode::End => {
+                            completion = None;
+                            editor.move_end();
+                        }
+                        KeyCode::Char(c) => {
+                            completion = None;
+                            editor.insert_char(c);
+                        }
                         _ => {}
                     }
                 }
@@ -1062,8 +1190,18 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         .block(Block::default().borders(Borders::ALL).title("cymbal")),
                     chunks[0],
                 );
+                let mut status_text = status.render();
+                if let Some((cands, idx)) = &completion
+                    && let Some(w) = cands.get(*idx)
+                {
+                    status_text.push_str(&format!(
+                        "  | complete: {w} ({} of {}, Tab next, Enter accept, Esc close)",
+                        idx + 1,
+                        cands.len()
+                    ));
+                }
                 f.render_widget(
-                    Paragraph::new(status.render()).block(Block::default().borders(Borders::ALL)),
+                    Paragraph::new(status_text).block(Block::default().borders(Borders::ALL)),
                     chunks[1],
                 );
                 if help_open {
@@ -1888,5 +2026,37 @@ mod tests {
             flush_claim(3, 0, &recent, false),
             FlushAction::Ignore
         ));
+    }
+
+    #[test]
+    fn completion_candidates_find_keywords_and_params() {
+        let c = completion_candidates("ve", &[]);
+        assert!(c.contains(&"vel".to_string()));
+        let c = completion_candidates("tem", &[]);
+        assert!(c.contains(&"tempo".to_string()));
+        let c = completion_candidates("c", &[]);
+        assert!(c.iter().any(|w| w.starts_with('c')));
+    }
+
+    #[test]
+    fn completion_candidates_include_voices_and_let_names() {
+        let c = completion_candidates("k", &["kick".to_string(), "klank".to_string()]);
+        assert!(c.contains(&"kick".to_string()));
+        assert!(c.contains(&"klank".to_string()));
+        let c = completion_candidates("", &["kick".to_string()]);
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn word_before_cursor_extracts_prefix() {
+        assert_eq!(word_prefix("    kick << \"x\" ve", 18), Some("ve".to_string()));
+        assert_eq!(word_prefix("kick", 4), Some("kick".to_string()));
+        assert_eq!(word_prefix("  ", 2), None);
+    }
+
+    #[test]
+    fn voice_names_from_src() {
+        let src = "let kick = kick()\nlet clap = sample \"clap\"\n";
+        assert_eq!(voice_names(src), vec!["kick".to_string(), "clap".to_string()]);
     }
 }

@@ -76,6 +76,30 @@ impl Editor {
         }
     }
 
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.insert_char(c);
+        }
+    }
+
+    pub fn delete_word_before_cursor(&mut self) {
+        if self.x == 0 {
+            return;
+        }
+        let line = self.lines[self.y].clone();
+        let byte_idx = line
+            .char_indices()
+            .nth(self.x)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+        let before = &line[..byte_idx];
+        let start_byte = before
+            .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '#')
+            .map_or(0, |i| i + 1);
+        self.lines[self.y].replace_range(start_byte..byte_idx, "");
+        self.x = before[..start_byte].chars().count();
+    }
+
     pub fn move_left(&mut self) {
         if self.x > 0 {
             self.x -= 1;
@@ -175,5 +199,30 @@ mod tests {
             e.content(),
             " tempo 120\nloop \"b\":\n    kick << \"x . . x\"\n"
         );
+    }
+
+    #[test]
+    fn insert_str_after_delete_word_replaces_prefix() {
+        let mut e = Editor::new("    kick << \"x\" ve\n".to_string());
+        e.move_end();
+        e.insert_str("l");
+        assert_eq!(e.content(), "    kick << \"x\" vel\n");
+    }
+
+    #[test]
+    fn delete_word_before_cursor_removes_word() {
+        let mut e = Editor::new("    kick << \"x\" vel\n".to_string());
+        e.move_end();
+        e.delete_word_before_cursor();
+        assert_eq!(e.content(), "    kick << \"x\" \n");
+        assert_eq!(e.x, 16);
+    }
+
+    #[test]
+    fn delete_word_before_cursor_does_nothing_at_line_start() {
+        let mut e = Editor::new("kick\n".to_string());
+        e.delete_word_before_cursor();
+        assert_eq!(e.content(), "kick\n");
+        assert_eq!(e.x, 0);
     }
 }
