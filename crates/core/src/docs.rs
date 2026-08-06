@@ -100,7 +100,7 @@ pub fn nearest<'a>(candidates: &[&'a str], input: &str) -> Option<&'a str> {
         if d > 2 {
             continue;
         }
-        let prefix = c.len() >= input.len() && c[..input.len()].starts_with(input);
+        let prefix = c.starts_with(input);
         let better = match best {
             None => true,
             Some((bd, bp, bc)) => (!prefix, d, c.len()) < (!bp, bd, bc.len()),
@@ -263,6 +263,18 @@ mod tests {
         let md = markdown();
         for p in PARAM_NAMES {
             assert!(md.contains(p), "markdown must document {p}");
+        }
+    }
+
+    #[test]
+    fn name_constants_match_tables() {
+        let param_entries: Vec<&str> = PARAMS.iter().map(|e| e.name).collect();
+        let voice_entries: Vec<&str> = VOICES.iter().map(|e| e.name).collect();
+        for p in PARAM_NAMES {
+            assert!(param_entries.contains(p), "PARAM_NAMES '{p}' missing from PARAMS table");
+        }
+        for v in VOICE_NAMES {
+            assert!(voice_entries.contains(v), "VOICE_NAMES '{v}' missing from VOICES table");
         }
     }
 }
