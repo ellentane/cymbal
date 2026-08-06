@@ -94,8 +94,10 @@ impl Editor {
             .unwrap_or(line.len());
         let before = &line[..byte_idx];
         let start_byte = before
-            .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '#')
-            .map_or(0, |i| i + 1);
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_' && *c != '#')
+            .map_or(0, |(i, c)| i + c.len_utf8());
         self.lines[self.y].replace_range(start_byte..byte_idx, "");
         self.x = before[..start_byte].chars().count();
     }
@@ -203,10 +205,20 @@ mod tests {
 
     #[test]
     fn insert_str_after_delete_word_replaces_prefix() {
-        let mut e = Editor::new("    kick << \"x\" ve\n".to_string());
+        let mut e = Editor::new("c#".to_string());
         e.move_end();
-        e.insert_str("l");
-        assert_eq!(e.content(), "    kick << \"x\" vel\n");
+        e.delete_word_before_cursor();
+        e.insert_str("c#4");
+        assert_eq!(e.content(), "c#4");
+    }
+
+    #[test]
+    fn delete_word_before_cursor_survives_multibyte_preceding() {
+        let mut e = Editor::new("ével".to_string());
+        e.move_end();
+        e.delete_word_before_cursor();
+        assert_eq!(e.content(), "é");
+        assert_eq!(e.x, 1);
     }
 
     #[test]

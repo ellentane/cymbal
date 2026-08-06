@@ -558,10 +558,12 @@ fn word_prefix(line: &str, col: usize) -> Option<String> {
         .map(|(i, _)| i)
         .unwrap_or(line.len());
     let before = &line[..byte_idx];
-    let start = before
-        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '#')
-        .map_or(0, |i| i + 1);
-    let word = &before[start..];
+    let start_byte = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_' && *c != '#')
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let word = &before[start_byte..];
     if word.is_empty() { None } else { Some(word.to_string()) }
 }
 
@@ -760,6 +762,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                 && let Event::Key(k) = event::read()?
             {
                 if k.modifiers.contains(KeyModifiers::CONTROL) {
+                    completion = None;
                     match k.code {
                         KeyCode::Char('s') => {
                             let src = editor.content();
@@ -942,6 +945,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         _ => {}
                     }
                 } else if k.modifiers.contains(KeyModifiers::ALT) {
+                    completion = None;
                     if let Some(kind) = alt_transform_kind(k.code) {
                         let src = editor.content();
                         match cymbal_core::transform::transform_src(&src, editor.cursor().1, kind) {
@@ -967,6 +971,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                     }
                 } else {
+                    if !matches!(k.code, KeyCode::Tab | KeyCode::Enter) {
+                        completion = None;
+                    }
                     match k.code {
                         KeyCode::F(1) if help_open => {
                             help_open = false;
@@ -992,8 +999,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 *idx = (*idx + 1) % cands.len();
                             } else {
                                 let (col, line_idx) = editor.cursor();
-                                let line = editor.lines()[line_idx].clone();
-                                let prefix = word_prefix(&line, col);
+                                let prefix = word_prefix(&editor.lines()[line_idx], col);
                                 let cands = prefix
                                     .map(|p| completion_candidates(&p, &voice_names(&editor.content())))
                                     .unwrap_or_default();
@@ -1012,39 +1018,14 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 editor.newline();
                             }
                         }
-                        KeyCode::Esc => completion = None,
-                        KeyCode::Backspace => {
-                            completion = None;
-                            editor.backspace();
-                        }
-                        KeyCode::Left => {
-                            completion = None;
-                            editor.move_left();
-                        }
-                        KeyCode::Right => {
-                            completion = None;
-                            editor.move_right();
-                        }
-                        KeyCode::Up => {
-                            completion = None;
-                            editor.move_up();
-                        }
-                        KeyCode::Down => {
-                            completion = None;
-                            editor.move_down();
-                        }
-                        KeyCode::Home => {
-                            completion = None;
-                            editor.move_home();
-                        }
-                        KeyCode::End => {
-                            completion = None;
-                            editor.move_end();
-                        }
-                        KeyCode::Char(c) => {
-                            completion = None;
-                            editor.insert_char(c);
-                        }
+                        KeyCode::Backspace => editor.backspace(),
+                        KeyCode::Left => editor.move_left(),
+                        KeyCode::Right => editor.move_right(),
+                        KeyCode::Up => editor.move_up(),
+                        KeyCode::Down => editor.move_down(),
+                        KeyCode::Home => editor.move_home(),
+                        KeyCode::End => editor.move_end(),
+                        KeyCode::Char(c) => editor.insert_char(c),
                         _ => {}
                     }
                 }
@@ -2034,8 +2015,8 @@ mod tests {
         assert!(c.contains(&"vel".to_string()));
         let c = completion_candidates("tem", &[]);
         assert!(c.contains(&"tempo".to_string()));
-        let c = completion_candidates("c", &[]);
-        assert!(c.iter().any(|w| w.starts_with('c')));
+        let c = completion_candidates("every", &[]);
+        assert_eq!(c, vec!["every(".to_string()]);
     }
 
     #[test]
@@ -2052,6 +2033,11 @@ mod tests {
         assert_eq!(word_prefix("    kick << \"x\" ve", 18), Some("ve".to_string()));
         assert_eq!(word_prefix("kick", 4), Some("kick".to_string()));
         assert_eq!(word_prefix("  ", 2), None);
+    }
+
+    #[test]
+    fn word_prefix_survives_multibyte_preceding() {
+        assert_eq!(word_prefix("ével", 4), Some("vel".to_string()));
     }
 
     #[test]
