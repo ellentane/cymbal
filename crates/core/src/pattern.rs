@@ -15,121 +15,171 @@ pub struct Step {
     pub semitone: i32,
 }
 
+fn dot_followed_by_digit(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut probe = chars.clone();
+    probe.next();
+    probe.next().is_some_and(|c| c.is_ascii_digit())
+}
+
+pub(crate) fn parse_modifier_ops(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Result<(f32, i32, String)> {
+    let mut velocity = 1.0f32;
+    let mut semitone = 0i32;
+    let mut text = String::new();
+    loop {
+        match chars.peek() {
+            Some('*') => {
+                chars.next();
+                text.push('*');
+                let mut num = String::new();
+                while let Some(&c2) = chars.peek() {
+                    if c2.is_ascii_digit() || c2 == '.' {
+                        num.push(c2);
+                        text.push(c2);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let junk = match chars.peek() {
+                    Some(&c2) => {
+                        c2.is_ascii_alphanumeric() || (c2 == '.' && dot_followed_by_digit(chars))
+                    }
+                    None => false,
+                };
+                if junk {
+                    while let Some(&c2) = chars.peek() {
+                        if c2.is_ascii_alphanumeric() || c2 == '.' {
+                            num.push(c2);
+                            text.push(c2);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Err(Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        format!("expected number after '*', got {num}"),
+                    ));
+                }
+                let v: f32 = num.parse().map_err(|_| {
+                    Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        "expected number after '*'",
+                    )
+                    .with_hint("write x*0.5 or x+2")
+                })?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        format!("velocity must be in 0..=1, got {v}"),
+                    )
+                    .with_hint("velocity caps at 1 — try x*0.5"));
+                }
+                velocity *= v;
+                if chars.peek() == Some(&'.') {
+                    break;
+                }
+            }
+            Some('+') | Some('-') => {
+                let Some(&sign) = chars.peek() else {
+                    unreachable!()
+                };
+                chars.next();
+                text.push(sign);
+                let mut num = String::new();
+                while let Some(&c2) = chars.peek() {
+                    if c2.is_ascii_digit() {
+                        num.push(c2);
+                        text.push(c2);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let junk = match chars.peek() {
+                    Some(&c2) => {
+                        c2.is_ascii_alphanumeric() || (c2 == '.' && dot_followed_by_digit(chars))
+                    }
+                    None => false,
+                };
+                if junk {
+                    while let Some(&c2) = chars.peek() {
+                        if c2.is_ascii_alphanumeric() || c2 == '.' {
+                            num.push(c2);
+                            text.push(c2);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Err(Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        format!("expected integer after '{sign}', got {num}"),
+                    ));
+                }
+                let n: i32 = num.parse().map_err(|_| {
+                    Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        format!("expected integer after '{sign}'"),
+                    )
+                    .with_hint("write x*0.5 or x+2")
+                })?;
+                let shifted = if sign == '+' { n } else { -n };
+                if !(-48..=48).contains(&shifted) {
+                    return Err(Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        format!("semitone shift out of range: {shifted} (max 48)"),
+                    ));
+                }
+                semitone += shifted;
+                if !(-48..=48).contains(&semitone) {
+                    return Err(Error::new(
+                        Span { line: 1, col: 1 },
+                        ErrorKind::Parse,
+                        format!("semitone shift out of range: {semitone} (max 48)"),
+                    ));
+                }
+                if chars.peek() == Some(&'.') {
+                    break;
+                }
+            }
+            Some('!') => {
+                return Err(Error::new(
+                    Span { line: 1, col: 1 },
+                    ErrorKind::Parse,
+                    "velocity modifier '!' is '*' now",
+                )
+                .with_hint("write x*0.5 instead of x!0.5"));
+            }
+            Some('@') => {
+                return Err(Error::new(
+                    Span { line: 1, col: 1 },
+                    ErrorKind::Parse,
+                    "transpose modifier '@' is '+' or '-' now",
+                )
+                .with_hint("write x+2 instead of x@2"));
+            }
+            _ => break,
+        }
+    }
+    Ok((velocity, semitone, text))
+}
+
 pub fn expand_string(s: &str) -> Result<Vec<Hit>> {
     let mut hits = Vec::new();
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             'x' => {
-                let mut velocity = 1.0f32;
-                let mut semitone = 0i32;
-                loop {
-                    match chars.peek() {
-                        Some('*') => {
-                            chars.next();
-                            let mut num = String::new();
-                            while let Some(&c2) = chars.peek() {
-                                if c2.is_ascii_digit() || c2 == '.' {
-                                    num.push(c2);
-                                    chars.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            let v: f32 = num.parse().map_err(|_| {
-                                Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    "expected number after '*'",
-                                )
-                            })?;
-                            if !(0.0..=1.0).contains(&v) {
-                                return Err(Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    format!("velocity must be in 0..=1, got {v}"),
-                                )
-                                .with_hint("velocity caps at 1 — try x*0.5"));
-                            }
-                            velocity *= v;
-                            if !(0.0..=1.0).contains(&velocity) {
-                                return Err(Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    "velocity must be in 0..=1",
-                                ));
-                            }
-                        }
-                        Some('+') | Some('-') => {
-                            let sign = *chars.peek().unwrap();
-                            chars.next();
-                            let mut num = String::new();
-                            while let Some(&c2) = chars.peek() {
-                                if c2.is_ascii_digit() {
-                                    num.push(c2);
-                                    chars.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            if chars.peek().is_some_and(|c2| c2.is_ascii_alphanumeric() || *c2 == '.') {
-                                while let Some(&c2) = chars.peek() {
-                                    if c2.is_ascii_alphanumeric() || c2 == '.' {
-                                        num.push(c2);
-                                        chars.next();
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                return Err(Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    format!("expected integer after '{sign}', got {num}"),
-                                ));
-                            }
-                            let n: i32 = num.parse().map_err(|_| {
-                                Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    format!("expected integer after '{sign}'"),
-                                )
-                            })?;
-                            let shifted = if sign == '+' { n } else { -n };
-                            if !(-48..=48).contains(&shifted) {
-                                return Err(Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    "semitone shift out of range (-48..=48)",
-                                ));
-                            }
-                            semitone += shifted;
-                            if !(-48..=48).contains(&semitone) {
-                                return Err(Error::new(
-                                    Span { line: 1, col: 1 },
-                                    ErrorKind::Parse,
-                                    format!("semitone shift out of range: {semitone} (max 48)"),
-                                ));
-                            }
-                        }
-                        Some('!') => {
-                            return Err(Error::new(
-                                Span { line: 1, col: 1 },
-                                ErrorKind::Parse,
-                                "velocity modifier '!' is '*' now",
-                            )
-                            .with_hint("write x*0.5 instead of x!0.5"));
-                        }
-                        Some('@') => {
-                            return Err(Error::new(
-                                Span { line: 1, col: 1 },
-                                ErrorKind::Parse,
-                                "transpose modifier '@' is '+' or '-' now",
-                            )
-                            .with_hint("write x+2 instead of x@2"));
-                        }
-                        _ => break,
-                    }
-                }
+                let (velocity, semitone, _) = parse_modifier_ops(&mut chars)?;
                 hits.push(Hit {
                     on: true,
                     velocity,
@@ -603,10 +653,40 @@ mod tests {
     fn fractional_transpose_reports_integer_error() {
         let err = expand_string("x+2.5").unwrap_err();
         assert!(err.message.contains("integer"), "got: {}", err.message);
-        let err = expand_string("x+2.").unwrap_err();
-        assert!(err.message.contains("integer"), "got: {}", err.message);
         let err = expand_string("x+1e2").unwrap_err();
         assert!(err.message.contains("integer"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn dot_after_transpose_starts_rest() {
+        assert_eq!(
+            expand_string("x+2. x+3.x").unwrap(),
+            vec![
+                Hit { on: true, velocity: 1.0, semitone: 2 },
+                Hit { on: false, velocity: 1.0, semitone: 0 },
+                Hit { on: true, velocity: 1.0, semitone: 3 },
+                Hit { on: false, velocity: 1.0, semitone: 0 },
+                Hit { on: true, velocity: 1.0, semitone: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_operands_and_junk_rejected() {
+        let err = expand_string("x*").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.hint.is_some());
+        let err = expand_string("x+").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.hint.is_some());
+        let err = expand_string("x-0.5").unwrap_err();
+        assert!(err.message.contains("got 0.5"), "got: {}", err.message);
+        let err = expand_string("x+2abc").unwrap_err();
+        assert!(err.message.contains("got 2abc"), "got: {}", err.message);
+        let err = expand_string("x*2abc").unwrap_err();
+        assert!(err.message.contains("got 2abc"), "got: {}", err.message);
+        let err = expand_string("x+48+1").unwrap_err();
+        assert!(err.message.contains("49"), "got: {}", err.message);
     }
 
     #[test]
