@@ -198,15 +198,15 @@ impl<'a> Parser<'a> {
     fn parse_bind(&mut self) -> Result<BindStmt> {
         let span = self.span();
         let voice = self.parse_expr()?;
+        if matches!(voice, Expr::Notes(..)) {
+            return Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "a note array can't be a voice",
+            )
+            .with_hint("notes come first after '<<': lead << [c2, f2] \"x . x .\""));
+        }
         if self.peek_kind() != &TokenKind::Bind {
-            if matches!(voice, Expr::Notes(..)) {
-                return Err(Error::new(
-                    self.span(),
-                    ErrorKind::Parse,
-                    "a note array can't be a voice",
-                )
-                .with_hint("notes come first after '<<': lead << [c2, f2] \"x . x .\""));
-            }
             return Err(Error::new(self.span(), ErrorKind::Parse, "expected '<<'"));
         }
         self.advance();
@@ -215,6 +215,16 @@ impl<'a> Parser<'a> {
         while self.peek_kind() == &TokenKind::Pipe {
             self.advance();
             combinators.push(self.parse_combinator()?);
+        }
+        if matches!(pattern, Expr::PatternString(..))
+            && matches!(self.peek_kind(), TokenKind::LBracket)
+        {
+            return Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "rhythm string can't come before notes",
+            )
+            .with_hint("notes come first: lead << [c2, f2] \"x . x .\""));
         }
         let mut pan = None;
         let mut vel = None;
@@ -604,9 +614,18 @@ loop "beat" tempo=90:
     }
 
     #[test]
+    fn notes_on_left_of_bind_rejected_with_hint() {
+        let err = parse(&lex("loop \"a\":\n    [c2, f2] << \"x . x .\"\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
     fn rhythm_first_rejected_with_hint() {
         let err = parse(&lex("loop \"a\":\n    kick << \"x . x .\" [c2, f2]\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.message.contains("before notes") || err.message.contains("first"));
+        assert!(err.hint.is_some());
     }
 
     #[test]
