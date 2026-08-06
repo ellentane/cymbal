@@ -134,7 +134,8 @@ impl Lexer {
                     } else if self.peek2().is_some_and(|(c2, _)| c2.is_ascii_digit()) {
                         return self.lex_number(span);
                     } else {
-                        return Err(Error::new(span, ErrorKind::Lex, "unexpected character '-'"));
+                        return Err(Error::new(span, ErrorKind::Lex, "unexpected character '-'")
+                            .with_hint("glyphs are quoted in help topics: help \".\""));
                     }
                 }
                 '"' => return self.lex_string(span),
@@ -223,16 +224,14 @@ impl Lexer {
                             span,
                         });
                     }
-                    return Err(Error::new(span, ErrorKind::Lex, "unexpected character '.'"));
+                    return Err(Error::new(span, ErrorKind::Lex, "unexpected character '.'")
+                        .with_hint("glyphs are quoted in help topics: help \".\""));
                 }
                 '0'..='9' => return self.lex_number(span),
                 'a'..='g' => return self.lex_alpha(span),
                 _ if c.is_ascii_alphabetic() => return self.lex_ident(span),
                 _ => {
-                    let hint = matches!(
-                        c,
-                        '.' | '*' | '=' | ',' | '+' | '-' | '[' | ']'
-                    )
+                    let hint = matches!(c, '*' | '+')
                     .then(|| "glyphs are quoted in help topics: help \".\"");
                     let mut err = Error::new(
                         span,
@@ -486,6 +485,14 @@ mod tests {
     fn leading_dot_number_rejected() {
         let err = lex("pan=.5..1\n").unwrap_err();
         assert_eq!(err.kind, ErrorKind::Lex);
+    }
+
+    #[test]
+    fn glyph_typos_in_help_get_hints() {
+        let err = lex("help .\n").unwrap_err();
+        assert!(err.hint.is_some());
+        let err = lex("help -\n").unwrap_err();
+        assert!(err.hint.is_some());
     }
 
     #[test]

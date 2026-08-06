@@ -810,7 +810,7 @@ loop "beat" tempo=90:
 
     #[test]
     fn parses_help_statements() {
-        let program = parse(&lex("help pan\nhelp\nhelp rev\nhelp |\nhelp <<\nhelp \"*\"\n").unwrap()).unwrap();
+        let program = parse(&lex("help pan\nhelp\nhelp rev\nhelp |\nhelp <<\nhelp \"*\"\nhelp ..\nhelp tempo\nhelp let\nhelp help\n").unwrap()).unwrap();
         assert_eq!(
             program.statements,
             vec![
@@ -820,6 +820,10 @@ loop "beat" tempo=90:
                 Stmt::Help(Some("|".into()), Span { line: 4, col: 1 }),
                 Stmt::Help(Some("<<".into()), Span { line: 5, col: 1 }),
                 Stmt::Help(Some("*".into()), Span { line: 6, col: 1 }),
+                Stmt::Help(Some("..".into()), Span { line: 7, col: 1 }),
+                Stmt::Help(Some("tempo".into()), Span { line: 8, col: 1 }),
+                Stmt::Help(Some("let".into()), Span { line: 9, col: 1 }),
+                Stmt::Help(Some("help".into()), Span { line: 10, col: 1 }),
             ]
         );
     }
