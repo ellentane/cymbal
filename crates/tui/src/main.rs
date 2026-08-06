@@ -891,10 +891,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     match k.code {
                         KeyCode::F(1) if help_open => {
                             help_open = false;
+                            help_override = None;
                         }
                         KeyCode::F(1) => help_open = !help_open,
                         KeyCode::Esc if help_open => {
                             help_open = false;
+                            help_override = None;
                         }
                         KeyCode::Up if help_open => {
                             help_scroll = help_scroll.saturating_sub(1);
@@ -1073,10 +1075,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .get(editor.cursor().1)
                                 .map(|l| l.as_str());
                             let cursor_col = editor.cursor().0;
-                            help_panel::help_panel_text(
-                                cursor_line.map(|l| (l, cursor_col)),
-                                help_scroll as usize,
-                            )
+                            help_panel::help_panel_text(cursor_line.map(|l| (l, cursor_col)))
                         }
                     };
                     let lines: Vec<ratatui::text::Line> =

@@ -25,7 +25,10 @@ pub fn highlight_topic(line: &str, col: usize) -> Option<&'static str> {
         let name_start = rest[..name_end]
             .rfind(|c: char| !c.is_ascii_alphanumeric())
             .map_or(0, |i| i + 1);
-        let name = &rest[name_start..name_end];
+        let name = match rest.get(name_start..name_end) {
+            Some(name) => name,
+            None => break,
+        };
         if let Some(static_name) = docs::PARAM_NAMES.iter().copied().find(|n| *n == name) {
             return Some(static_name);
         }
@@ -34,7 +37,7 @@ pub fn highlight_topic(line: &str, col: usize) -> Option<&'static str> {
     None
 }
 
-pub fn help_panel_text(cursor: Option<(&str, usize)>, _scroll: usize) -> String {
+pub fn help_panel_text(cursor: Option<(&str, usize)>) -> String {
     let mut out = String::new();
     if let Some((line, col)) = cursor
         && let Some(topic) = highlight_topic(line, col)
@@ -65,7 +68,7 @@ mod tests {
 
     #[test]
     fn panel_renders_sections_and_keybindings() {
-        let text = help_panel_text(None, 0);
+        let text = help_panel_text(None);
         assert!(text.contains("Symbols"));
         assert!(text.contains("Params"));
         assert!(text.contains("Keybindings"));
@@ -84,7 +87,13 @@ mod tests {
 
     #[test]
     fn highlighted_topic_is_prepended() {
-        let text = help_panel_text(Some(("    kick << \"x\" vel=0.5", 21)), 0);
+        let text = help_panel_text(Some(("    kick << \"x\" vel=0.5", 21)));
         assert!(text.starts_with("context: vel"));
+    }
+
+    #[test]
+    fn unicode_before_param_does_not_panic() {
+        let line = "-- note: φ=golden";
+        assert!(highlight_topic(line, 20).is_none());
     }
 }
