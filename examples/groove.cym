@@ -13,7 +13,7 @@ loop "drums":
     hat   << "x . x x . x x x" pan=0.5 delay=0.25
 
 loop "low":
-    bass << ([c2, c2, f2, g2], "x . . . . . . .") pan=-0.4
+    bass << [c2, c2, f2, g2] "x . . . . . . ." pan=-0.4
 
 loop "air":
     lead << [c5, bb4, g4, f4] | every(3, rev) delay=0.4

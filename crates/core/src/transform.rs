@@ -259,11 +259,11 @@ mod tests {
 
     #[test]
     fn transform_handles_tuple_patterns() {
-        let src = "loop \"b\":\n    bass << ([c2, f2], \"x . . x\")\n";
+        let src = "loop \"b\":\n    bass << [c2, f2] \"x . . x\"\n";
         let out = transform_src(src, 1, TransformKind::HalfSpeed).unwrap();
         assert_eq!(
             out,
-            "loop \"b\":\n    bass << ([c2, f2], \"x x . . . . x x\")\n"
+            "loop \"b\":\n    bass << [c2, f2] \"x x . . . . x x\"\n"
         );
     }
 

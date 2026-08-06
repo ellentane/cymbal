@@ -1,4 +1,5 @@
 use crate::ast::{BindStmt, Combinator, Expr, LoopStmt, Note, Param, Program, Stmt, VoiceKind};
+use crate::docs::{nearest, PARAM_NAMES, VOICE_NAMES};
 use crate::error::{Error, ErrorKind, Result, Span};
 use crate::lexer::{Token, TokenKind};
 
@@ -198,10 +199,18 @@ impl<'a> Parser<'a> {
         let span = self.span();
         let voice = self.parse_expr()?;
         if self.peek_kind() != &TokenKind::Bind {
+            if matches!(voice, Expr::Notes(..)) {
+                return Err(Error::new(
+                    self.span(),
+                    ErrorKind::Parse,
+                    "a note array can't be a voice",
+                )
+                .with_hint("notes come first after '<<': lead << [c2, f2] \"x . x .\""));
+            }
             return Err(Error::new(self.span(), ErrorKind::Parse, "expected '<<'"));
         }
         self.advance();
-        let pattern = self.parse_expr()?;
+        let pattern = self.parse_pattern()?;
         let mut combinators = Vec::new();
         while self.peek_kind() == &TokenKind::Pipe {
             self.advance();
@@ -343,6 +352,17 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_pattern(&mut self) -> Result<Expr> {
+        let expr = self.parse_expr()?;
+        if let Expr::Notes(notes, span) = &expr
+            && let TokenKind::String(rhythm) = self.peek_kind().clone()
+        {
+            self.advance();
+            return Ok(Expr::Tuple(notes.clone(), rhythm, *span));
+        }
+        Ok(expr)
+    }
+
     fn parse_combinator(&mut self) -> Result<Combinator> {
         match self.peek_kind() {
             TokenKind::Rev => {
@@ -441,11 +461,18 @@ impl<'a> Parser<'a> {
                     "bass" => VoiceKind::Bass,
                     "lead" => VoiceKind::Lead,
                     other => {
-                        return Err(Error::new(
-                            span,
-                            ErrorKind::Parse,
-                            format!("unknown voice '{other}'"),
-                        ));
+                        let is_param = self.peek_kind() == &TokenKind::Assign;
+                        let candidates = if is_param { PARAM_NAMES } else { VOICE_NAMES };
+                        let msg = if is_param {
+                            format!("unknown parameter '{other}'")
+                        } else {
+                            format!("unknown voice '{other}'")
+                        };
+                        let mut err = Error::new(span, ErrorKind::Parse, msg);
+                        if let Some(close) = nearest(candidates, other) {
+                            err = err.with_hint(format!("did you mean '{close}'?"));
+                        }
+                        return Err(err);
                     }
                 };
                 Ok(Expr::Voice(kind, span))
@@ -494,76 +521,12 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Expr::Notes(notes, span))
             }
-            TokenKind::LParen => {
-                self.advance();
-                if self.peek_kind() != &TokenKind::LBracket {
-                    return Err(Error::new(
-                        self.span(),
-                        ErrorKind::Parse,
-                        "expected note array in tuple",
-                    ));
-                }
-                self.advance();
-                let mut notes = Vec::new();
-                if self.peek_kind() == &TokenKind::RBracket {
-                    return Err(Error::new(
-                        self.span(),
-                        ErrorKind::Parse,
-                        "tuple note array cannot be empty",
-                    ));
-                }
-                loop {
-                    let nspan = self.span();
-                    let TokenKind::Note(midi) = self.peek_kind().clone() else {
-                        return Err(Error::new(
-                            self.span(),
-                            ErrorKind::Parse,
-                            "expected note in tuple",
-                        ));
-                    };
-                    self.advance();
-                    notes.push(Note { midi, span: nspan });
-                    match self.peek_kind() {
-                        TokenKind::Comma => {
-                            self.advance();
-                        }
-                        TokenKind::RBracket => {
-                            self.advance();
-                            break;
-                        }
-                        _ => {
-                            return Err(Error::new(
-                                self.span(),
-                                ErrorKind::Parse,
-                                "expected ',' or ']'",
-                            ));
-                        }
-                    }
-                }
-                if self.peek_kind() != &TokenKind::Comma {
-                    return Err(Error::new(
-                        self.span(),
-                        ErrorKind::Parse,
-                        "expected ',' after notes in tuple",
-                    ));
-                }
-                self.advance();
-                if !matches!(self.peek_kind(), TokenKind::String(_)) {
-                    return Err(Error::new(
-                        self.span(),
-                        ErrorKind::Parse,
-                        "expected pattern string in tuple",
-                    ));
-                }
-                let TokenKind::String(s) = self.advance().kind else {
-                    unreachable!()
-                };
-                if self.peek_kind() != &TokenKind::RParen {
-                    return Err(Error::new(self.span(), ErrorKind::Parse, "expected ')'"));
-                }
-                self.advance();
-                Ok(Expr::Tuple(notes, s, span))
-            }
+            TokenKind::LParen => Err(Error::new(
+                span,
+                ErrorKind::Parse,
+                "parens are gone: write [c2, f2] \"x . . .\"",
+            )
+            .with_hint("put the notes and the rhythm string after '<<' without parentheses")),
             _ => Err(Error::new(span, ErrorKind::Parse, "expected expression")),
         }
     }
@@ -614,8 +577,8 @@ loop "beat" tempo=90:
     }
 
     #[test]
-    fn parses_tuple_pattern() {
-        let src = "loop \"a\":\n    bass << ([c2, f2], \"x . x .\")\n";
+    fn parses_notes_with_rhythm_without_parens() {
+        let src = "loop \"a\":\n    bass << [c2, f2] \"x . x .\"\n";
         let program = parse(&lex(src).unwrap()).unwrap();
         let Stmt::Loop(l) = &program.statements[0] else {
             panic!()
@@ -624,19 +587,44 @@ loop "beat" tempo=90:
             l.binds[0].pattern,
             Expr::Tuple(
                 vec![
-                    Note {
-                        midi: 36,
-                        span: Span { line: 2, col: 15 }
-                    },
-                    Note {
-                        midi: 41,
-                        span: Span { line: 2, col: 19 }
-                    }
+                    Note { midi: 36, span: Span { line: 2, col: 14 } },
+                    Note { midi: 41, span: Span { line: 2, col: 18 } },
                 ],
                 "x . x .".into(),
                 Span { line: 2, col: 13 }
             )
         );
+    }
+
+    #[test]
+    fn tuple_parens_rejected_with_hint() {
+        let err = parse(&lex("loop \"a\":\n    bass << ([c2, f2], \"x . x .\")\n").unwrap()).unwrap_err();
+        assert!(err.message.contains("parens"));
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
+    fn rhythm_first_rejected_with_hint() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x . x .\" [c2, f2]\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+    }
+
+    #[test]
+    fn unknown_param_suggests_closest_name() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" vol=0.9\n").unwrap()).unwrap_err();
+        assert!(err.message.contains("vol"));
+        assert!(err.hint.as_deref().unwrap().contains("vel"));
+    }
+
+    #[test]
+    fn notes_followed_by_pipe_keep_no_rhythm() {
+        let src = "loop \"a\":\n    lead << [c4, d4] | rev\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].pattern, Expr::Notes(..)));
+        assert_eq!(l.binds[0].combinators.len(), 1);
     }
 
     #[test]
