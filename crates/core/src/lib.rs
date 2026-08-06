@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod builtin_samples;
+pub mod docs;
 pub mod dsp;
 pub mod error;
 pub mod lexer;

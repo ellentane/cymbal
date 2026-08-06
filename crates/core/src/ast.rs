@@ -74,6 +74,7 @@ pub enum Stmt {
     },
     Loop(LoopStmt),
     Tempo(f64, Span),
+    Help(Option<String>, Span),
 }
 
 #[derive(Debug, Clone, PartialEq)]
