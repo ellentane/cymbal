@@ -21,29 +21,114 @@ pub fn tokenize_pattern(s: &str) -> Result<Vec<String>> {
             'x' => {
                 let mut tok = String::from("x");
                 i += 1;
-                let mut modifier = None;
-                while i < chars.len() {
-                    let c = chars[i];
-                    match modifier {
-                        None if c == '!' || c == '@' => {
-                            modifier = Some(c);
-                            tok.push(c);
+                let mut velocity = 1.0f32;
+                let mut semitone = 0i32;
+                'mods: loop {
+                    match chars.get(i) {
+                        Some('*') => {
+                            tok.push('*');
                             i += 1;
+                            let mut num = String::new();
+                            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                                num.push(chars[i]);
+                                tok.push(chars[i]);
+                                i += 1;
+                            }
+                            let v: f32 = num.parse().map_err(|_| {
+                                Error::new(
+                                    Span { line: 1, col: 1 },
+                                    ErrorKind::Parse,
+                                    "expected number after '*'",
+                                )
+                            })?;
+                            if !(0.0..=1.0).contains(&v) {
+                                return Err(Error::new(
+                                    Span { line: 1, col: 1 },
+                                    ErrorKind::Parse,
+                                    format!("velocity must be in 0..=1, got {v}"),
+                                )
+                                .with_hint("velocity caps at 1 — try x*0.5"));
+                            }
+                            velocity *= v;
+                            if !(0.0..=1.0).contains(&velocity) {
+                                return Err(Error::new(
+                                    Span { line: 1, col: 1 },
+                                    ErrorKind::Parse,
+                                    "velocity must be in 0..=1",
+                                ));
+                            }
                         }
-                        Some('!') if c == '@' => {
-                            modifier = Some('@');
-                            tok.push(c);
+                        Some('+') | Some('-') => {
+                            let sign = chars[i];
+                            tok.push(sign);
                             i += 1;
+                            let mut num = String::new();
+                            while i < chars.len() && chars[i].is_ascii_digit() {
+                                num.push(chars[i]);
+                                tok.push(chars[i]);
+                                i += 1;
+                            }
+                            if i < chars.len() {
+                                let next = chars[i];
+                                let fractional = next == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit();
+                                if next.is_ascii_alphanumeric() || fractional {
+                                    while i < chars.len()
+                                        && (chars[i].is_ascii_alphanumeric() || chars[i] == '.')
+                                    {
+                                        num.push(chars[i]);
+                                        i += 1;
+                                    }
+                                    return Err(Error::new(
+                                        Span { line: 1, col: 1 },
+                                        ErrorKind::Parse,
+                                        format!("expected integer after '{sign}', got {num}"),
+                                    ));
+                                }
+                                if next == '.' {
+                                    break 'mods;
+                                }
+                            }
+                            let n: i32 = num.parse().map_err(|_| {
+                                Error::new(
+                                    Span { line: 1, col: 1 },
+                                    ErrorKind::Parse,
+                                    format!("expected integer after '{sign}'"),
+                                )
+                            })?;
+                            let shifted = if sign == '+' { n } else { -n };
+                            if !(-48..=48).contains(&shifted) {
+                                return Err(Error::new(
+                                    Span { line: 1, col: 1 },
+                                    ErrorKind::Parse,
+                                    "semitone shift out of range (-48..=48)",
+                                ));
+                            }
+                            semitone += shifted;
+                            if !(-48..=48).contains(&semitone) {
+                                return Err(Error::new(
+                                    Span { line: 1, col: 1 },
+                                    ErrorKind::Parse,
+                                    format!("semitone shift out of range: {semitone} (max 48)"),
+                                ));
+                            }
                         }
-                        Some('!') if c.is_ascii_digit() || c == '.' => {
-                            tok.push(c);
-                            i += 1;
+                        Some('!') => {
+                            return Err(Error::new(
+                                Span { line: 1, col: 1 },
+                                ErrorKind::Parse,
+                                "velocity modifier '!' is '*' now",
+                            )
+                            .with_hint("write x*0.5 instead of x!0.5"));
                         }
-                        Some('@') if c.is_ascii_digit() || (c == '-' && tok.ends_with('@')) => {
-                            tok.push(c);
-                            i += 1;
+                        Some('@') => {
+                            return Err(Error::new(
+                                Span { line: 1, col: 1 },
+                                ErrorKind::Parse,
+                                "transpose modifier '@' is '+' or '-' now",
+                            )
+                            .with_hint("write x+2 instead of x@2"));
                         }
-                        _ => break,
+                        _ => break 'mods,
                     }
                 }
                 tokens.push(tok);
@@ -53,11 +138,21 @@ pub fn tokenize_pattern(s: &str) -> Result<Vec<String>> {
                 i += 1;
             }
             other => {
-                return Err(Error::new(
+                let hint = match other {
+                    '!' => Some("hit velocity is '*' now: x*0.5"),
+                    '@' => Some("hit transpose is '+' or '-' now: x+2"),
+                    '*' | '+' | '-' => Some("modifiers attach to a hit: x*0.5, x+2"),
+                    _ => None,
+                };
+                let mut err = Error::new(
                     Span { line: 1, col: 1 },
                     ErrorKind::Parse,
-                    format!("invalid pattern character '{other}'"),
-                ));
+                    format!("invalid pattern character '{other}' (use 'x' for hit, '.' for rest)"),
+                );
+                if let Some(h) = hint {
+                    err = err.with_hint(h);
+                }
+                return Err(err);
             }
         }
     }
@@ -187,8 +282,8 @@ mod tests {
     #[test]
     fn tokens_keep_modifiers() {
         assert_eq!(
-            tokenize_pattern("x!0.5@3 . x@-2").unwrap(),
-            vec!["x!0.5@3", ".", "x@-2"]
+            tokenize_pattern("x*0.5+3 . x-2").unwrap(),
+            vec!["x*0.5+3", ".", "x-2"]
         );
     }
 
@@ -231,9 +326,30 @@ mod tests {
     #[test]
     fn half_speed_preserves_modifiers() {
         assert_eq!(
-            apply_kind("x!0.5 .", TransformKind::HalfSpeed).unwrap(),
-            "x!0.5 x!0.5 . ."
+            apply_kind("x*0.5 .", TransformKind::HalfSpeed).unwrap(),
+            "x*0.5 x*0.5 . ."
         );
+    }
+
+    #[test]
+    fn tokenizer_errors_match_expand_string() {
+        let err = tokenize_pattern("x!0.5").unwrap_err();
+        assert!(err.message.contains('*'));
+        assert!(err.hint.is_some());
+        let err = tokenize_pattern("x@2").unwrap_err();
+        assert!(err.message.contains('+'));
+        assert!(err.hint.is_some());
+        let err = tokenize_pattern("x+2.5").unwrap_err();
+        assert!(err.message.contains("integer"), "got: {}", err.message);
+        let err = tokenize_pattern("x*2").unwrap_err();
+        assert!(err.message.contains("0..=1"));
+        assert!(err.hint.is_some());
+        let err = tokenize_pattern("x+30+30").unwrap_err();
+        assert!(err.message.contains("out of range"));
+        let err = tokenize_pattern("!0.5").unwrap_err();
+        assert!(err.hint.is_some());
+        let err = tokenize_pattern("+3").unwrap_err();
+        assert!(err.hint.is_some());
     }
 
     #[test]
@@ -313,22 +429,22 @@ mod tests {
 
     #[test]
     fn tokens_split_rest_after_semitone() {
-        assert_eq!(tokenize_pattern("x@3.x").unwrap(), vec!["x@3", ".", "x"]);
+        assert_eq!(tokenize_pattern("x+3.x").unwrap(), vec!["x+3", ".", "x"]);
     }
 
     #[test]
     fn tokens_keep_velocity_then_semitone() {
         assert_eq!(
-            tokenize_pattern("x!0.5@3 . x").unwrap(),
-            vec!["x!0.5@3", ".", "x"]
+            tokenize_pattern("x*0.5+3 . x").unwrap(),
+            vec!["x*0.5+3", ".", "x"]
         );
     }
 
     #[test]
     fn half_speed_keeps_semitone_rest_parseable() {
         assert_eq!(
-            apply_kind("x@3.x", TransformKind::HalfSpeed).unwrap(),
-            "x@3 x@3 . . x x"
+            apply_kind("x+3.x", TransformKind::HalfSpeed).unwrap(),
+            "x+3 x+3 . . x x"
         );
     }
 

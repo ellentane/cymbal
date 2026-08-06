@@ -147,14 +147,14 @@ mod tests {
         assert_eq!(
             midi[0].bytes,
             [0x90, 63, 127],
-            "x@3 shifts the midi note up"
+            "x+3 shifts the midi note up"
         );
         tl.events[0].semitone = -4;
         let midi = build_timeline_midi(&tl);
         assert_eq!(
             midi[0].bytes,
             [0x90, 56, 127],
-            "x@-4 shifts the midi note down"
+            "x-4 shifts the midi note down"
         );
     }
 

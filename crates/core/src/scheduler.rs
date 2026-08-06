@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn events_carry_params_and_velocity() {
         let tl = src2timeline_v11(
-            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x!0.5 . x\" pan=0.5 vel=0.8 delay=0.2 reverb=0.1\n",
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x*0.5 . x\" pan=0.5 vel=0.8 delay=0.2 reverb=0.1\n",
             &HashMap::new(),
             &HashMap::new(),
             96000,
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(ev.reverb_send, 0.1);
         assert_eq!(ev.loop_name, "b");
         let ev2 = &tl.events[1];
-        assert_eq!(ev2.velocity, 0.8, "hits without !n use loop vel only");
+        assert_eq!(ev2.velocity, 0.8, "hits without *n use loop vel only");
     }
 
     #[test]
@@ -492,7 +492,7 @@ mod tests {
         let mut samples = HashMap::new();
         samples.insert("kick.wav".to_string(), Arc::new(data));
         let tl = src2timeline_v11(
-            "loop \"b\":\n    sample \"kick.wav\" << \"x@12\"\n",
+            "loop \"b\":\n    sample \"kick.wav\" << \"x+12\"\n",
             &HashMap::new(),
             &samples,
             96000,
@@ -500,7 +500,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             tl.events[0].duration, 24000,
-            "@12 = 2x rate = half duration"
+            "+12 = 2x rate = half duration"
         );
     }
 
