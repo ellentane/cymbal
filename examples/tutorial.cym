@@ -1,0 +1,46 @@
+-- tutorial.cym — build a groove one concept at a time
+-- Each section introduces ONE new idea. Play the file, then try the variations.
+tempo 110
+
+let kick = kick()
+let hat = hat()
+let bass = bass()
+let lead = lead()
+let clap = sample "clap"
+
+loop "learn":
+    -- 2. A rhythm pattern. Length = subdivision: 8 chars = 8th notes.
+    -- x hits, . rests. -- try: "x . . x . . x ." (a backbeat) or "x x x x x x x x".
+    kick << "x . x . x . x ."
+
+    -- 3. Per-hit velocity: * scales the hit. -- try: x*0.5 on the 3rd hit.
+    hat << "x*0.8 . x . x*0.4 . x ."
+
+    -- 4. Transpose: + and - shift a hit in semitones.
+    --    -- try: x+3 then x-3. (Pitched voices transpose; kick/snare shift body pitch; hats ignore it.)
+    lead << "x . x+2 . x-2 . x ."
+
+    -- 5. Note arrays: even triggers, one pitch each. -- try: [c5, e5, g5].
+    lead << [c5, e5, g5]
+
+    -- 6. Notes with a custom rhythm: [notes] "rhythm".
+    --    Pitches cycle across the hits. -- try: "x . . x . . . .".
+    bass << [c2, f2, g2] "x . . . . . . ."
+
+    -- 7. Transforms chain with |. rev reverses; every(n, rev) reverses every nth cycle.
+    --    -- try: | rev, or | every(2, rev).
+    lead << [c5, e5, g5] | every(4, rev)
+
+    -- 8. Parameters. pan sweeps with a .. ramp across the bar. -- try: pan=0.5 (fixed) instead.
+    hat << "x*0.8 . x . x*0.4 . x ." pan=-0.5..0.5 delay=0.25
+
+    -- 9. Samples: sample "name" loads the bundled kit (kick, snare, hat, clap, loop).
+    --    The let above binds it: clap << works. -- try: reverb=0.4.
+    clap << ". . . . x . . ." reverb=0.5
+
+-- 10. Polyrhythm: a second loop with a different pattern length phases against the first.
+--     -- try: "x . x ." (quarters) against the 8th-note drums above.
+loop "phase":
+    hat << "x . x ."
+
+-- Next: F1 help panel, `help <topic>` in the file, Tab completion, and `cymbal docs`.
