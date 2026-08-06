@@ -640,7 +640,6 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
 
     let mut recording = false;
     let mut help_open = false;
-    let mut help_scroll = 0u16;
     let mut help_override: Option<String> = None;
     let mut midi_sending = false;
     let mut record_start: Option<Instant> = None;
