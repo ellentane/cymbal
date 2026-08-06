@@ -8,9 +8,11 @@ let bass = bass()
 let lead = lead()
 let clap = sample "clap"
 
+-- Everything plays at once: comment out a line (--) to hear a single idea.
+
 loop "learn":
     -- 2. A rhythm pattern. Length = subdivision: 8 chars = 8th notes.
-    -- x hits, . rests. -- try: "x . . x . . x ." (a backbeat) or "x x x x x x x x".
+    -- x hits, . rests. -- try: "x . . x . . x ." (syncopated) or "x x x x x x x x".
     kick << "x . x . x . x ."
 
     -- 3. Per-hit velocity: * scales the hit. -- try: x*0.5 on the 3rd hit.
@@ -38,9 +40,9 @@ loop "learn":
     --    The let above binds it: clap << works. -- try: reverb=0.4.
     clap << ". . . . x . . ." reverb=0.5
 
--- 10. Polyrhythm: a second loop with a different pattern length phases against the first.
---     -- try: "x . x ." (quarters) against the 8th-note drums above.
+-- 10. Polyrhythm: a 3-char pattern against the 8th-note grid never lines up —
+--     it cycles against the drums. -- try: "x . . ." (4) or "x . . . . ." (6).
 loop "phase":
-    hat << "x . x ."
+    hat << "x . ."
 
 -- Next: F1 help panel, `help <topic>` in the file, Tab completion, and `cymbal docs`.
