@@ -1,4 +1,5 @@
 mod editor;
+mod help_panel;
 mod highlight;
 mod samples;
 mod status;
@@ -18,7 +19,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use cymbal_audio::ring::{AudioQueue, Msg};
 use cymbal_core::error::Error;
@@ -663,6 +664,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut recording = false;
     let mut help_open = false;
     let mut help_override: Option<String> = None;
+    let mut help_scroll = 0u16;
     let mut midi_sending = false;
     let mut record_start: Option<Instant> = None;
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -887,6 +889,23 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     }
                 } else {
                     match k.code {
+                        KeyCode::F(1) if help_open => {
+                            help_open = false;
+                        }
+                        KeyCode::F(1) => help_open = !help_open,
+                        KeyCode::Esc if help_open => {
+                            help_open = false;
+                        }
+                        KeyCode::Up if help_open => {
+                            help_scroll = help_scroll.saturating_sub(1);
+                        }
+                        KeyCode::Down if help_open => {
+                            help_scroll = help_scroll.saturating_add(1);
+                        }
+                        KeyCode::Char(_) if help_open => {}
+                        KeyCode::Enter if help_open => {}
+                        KeyCode::Backspace if help_open => {}
+                        KeyCode::Tab if help_open => {}
                         KeyCode::Char(c) => editor.insert_char(c),
                         KeyCode::Backspace => editor.backspace(),
                         KeyCode::Enter => editor.newline(),
@@ -1045,6 +1064,30 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     Paragraph::new(status.render()).block(Block::default().borders(Borders::ALL)),
                     chunks[1],
                 );
+                if help_open {
+                    let text = match &help_override {
+                        Some(t) => t.clone(),
+                        None => {
+                            let cursor_line = editor
+                                .lines()
+                                .get(editor.cursor().1)
+                                .map(|l| l.as_str());
+                            let cursor_col = editor.cursor().0;
+                            help_panel::help_panel_text(
+                                cursor_line.map(|l| (l, cursor_col)),
+                                help_scroll as usize,
+                            )
+                        }
+                    };
+                    let lines: Vec<ratatui::text::Line> =
+                        text.lines().map(ratatui::text::Line::raw).collect();
+                    let panel = Paragraph::new(lines)
+                        .block(Block::default().borders(Borders::ALL).title("help"))
+                        .scroll((help_scroll, 0));
+                    let area = chunks[0];
+                    f.render_widget(Clear, area);
+                    f.render_widget(panel, area);
+                }
             })?;
         }
         Ok(())
