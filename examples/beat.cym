@@ -14,4 +14,4 @@ loop "beat":
     bass << ([c2, f2, g2], "x . . x . . . .")
 
 loop "melody":
-    lead << [c4, d4, e4, g4] >> every(4, rev)
+    lead << [c4, d4, e4, g4] | every(4, rev)

@@ -71,8 +71,9 @@ fn token_text(t: &cymbal_core::lexer::Token) -> String {
         TokenKind::RBracket => "]".into(),
         TokenKind::Assign => "=".into(),
         TokenKind::Colon => ":".into(),
+        TokenKind::DotDot => "..".into(),
         TokenKind::Bind => "<<".into(),
-        TokenKind::Pipe => ">>".into(),
+        TokenKind::Pipe => "|".into(),
         TokenKind::Comma => ",".into(),
         _ => String::new(),
     }

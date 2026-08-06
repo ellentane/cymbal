@@ -17,6 +17,7 @@ pub enum TokenKind {
     RBracket,
     Assign,
     Colon,
+    DotDot,
     Bind,
     Pipe,
     Comma,
@@ -200,12 +201,28 @@ impl Lexer {
                     if self.peek2().map(|(c2, _)| c2) == Some('>') {
                         self.bump();
                         self.bump();
+                        return Err(Error::new(span, ErrorKind::Lex, "expected '|'")
+                            .with_hint("transforms chain with '|' now: \"x . x .\" | rev"));
+                    }
+                    return Err(Error::new(span, ErrorKind::Lex, "expected '|'"));
+                }
+                '|' => {
+                    self.bump();
+                    return Ok(Token {
+                        kind: TokenKind::Pipe,
+                        span,
+                    });
+                }
+                '.' => {
+                    if self.peek2().map(|(c2, _)| c2) == Some('.') {
+                        self.bump();
+                        self.bump();
                         return Ok(Token {
-                            kind: TokenKind::Pipe,
+                            kind: TokenKind::DotDot,
                             span,
                         });
                     }
-                    return Err(Error::new(span, ErrorKind::Lex, "expected '>>'"));
+                    return Err(Error::new(span, ErrorKind::Lex, "unexpected character '.'"));
                 }
                 '0'..='9' => return self.lex_number(span),
                 'a'..='g' => return self.lex_alpha(span),
@@ -247,7 +264,9 @@ impl Lexer {
             self.bump();
         }
         while let Some((c, _)) = self.peek() {
-            if c.is_ascii_digit() || c == '.' {
+            if c.is_ascii_digit()
+                || (c == '.' && self.peek2().is_some_and(|(c2, _)| c2.is_ascii_digit()))
+            {
                 s.push(c);
                 self.bump();
             } else {
@@ -374,7 +393,7 @@ mod tests {
 
     #[test]
     fn lexes_combinator_pipe() {
-        let tokens = lex("x << \"a\" >> every(4, rev)\n").unwrap();
+        let tokens = lex("x << \"a\" | every(4, rev)\n").unwrap();
         assert_eq!(
             k(&tokens),
             vec![
@@ -392,6 +411,70 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn lexes_pipe_operator() {
+        let tokens = lex("x << \"a\" | rev\n").unwrap();
+        assert_eq!(
+            k(&tokens),
+            vec![
+                TokenKind::Ident("x".into()),
+                TokenKind::Bind,
+                TokenKind::String("a".into()),
+                TokenKind::Pipe,
+                TokenKind::Rev,
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_dotdot_ramp() {
+        let tokens = lex("pan=0.5..0.6\n").unwrap();
+        assert_eq!(
+            k(&tokens),
+            vec![
+                TokenKind::Ident("pan".into()),
+                TokenKind::Assign,
+                TokenKind::Number(0.5),
+                TokenKind::DotDot,
+                TokenKind::Number(0.6),
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn number_does_not_swallow_dotdot() {
+        let tokens = lex("vel=1..0.5\n").unwrap();
+        assert_eq!(
+            k(&tokens),
+            vec![
+                TokenKind::Ident("vel".into()),
+                TokenKind::Assign,
+                TokenKind::Number(1.0),
+                TokenKind::DotDot,
+                TokenKind::Number(0.5),
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn double_gt_rejected_with_hint() {
+        let err = lex("x << \"a\" >> rev\n").unwrap_err();
+        assert!(err.kind == ErrorKind::Lex);
+        assert!(err.hint.as_deref().unwrap().contains('|'));
+    }
+
+    #[test]
+    fn leading_dot_number_rejected() {
+        let err = lex("pan=.5..1\n").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Lex);
     }
 
     #[test]

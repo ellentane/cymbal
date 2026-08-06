@@ -362,7 +362,7 @@ mod tests {
         // offsets [0, 24000, 48000, 72000] -> clamped < 40000 -> [0, 24000];
         // rev reverses pitches: [c2, f2, e4, c4] = [36, 41, 64, 60]
         let tl = src2timeline(
-            "let kick = kick()\nlet lead = lead()\nloop \"b\":\n    kick << \"x . x .\"\n    lead << [c4, e4, f2, c2] >> rev\n",
+            "let kick = kick()\nlet lead = lead()\nloop \"b\":\n    kick << \"x . x .\"\n    lead << [c4, e4, f2, c2] | rev\n",
             3,
             40000,
         );
@@ -573,7 +573,7 @@ mod tests {
         // "x . x ." = 4 steps, step_samples 24000: hits at steps 0,2 -> 0, 48000.
         // every(4) triggers on bar_idx 3; rev hits steps 1,3 -> bar_start + 24000, +72000.
         let tl = src2timeline(
-            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" >> every(4, rev)\n",
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" | every(4, rev)\n",
             0,
             384000,
         );
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn rev_reverses_pitches_within_bar() {
         let tl = src2timeline(
-            "let lead = lead()\nloop \"b\":\n    lead << [c4, e4, g4] >> rev\n",
+            "let lead = lead()\nloop \"b\":\n    lead << [c4, e4, g4] | rev\n",
             0,
             96000,
         );
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn rev_reverses_rhythm() {
         let tl = src2timeline(
-            "let kick = kick()\nloop \"b\":\n    kick << \". x . x\" >> rev\n",
+            "let kick = kick()\nloop \"b\":\n    kick << \". x . x\" | rev\n",
             0,
             96000,
         );
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn every_n_rev_applies_on_nth_cycle() {
         let tl = src2timeline(
-            "let lead = lead()\nloop \"b\":\n    lead << [c4, e4] >> every(2, rev)\n",
+            "let lead = lead()\nloop \"b\":\n    lead << [c4, e4] | every(2, rev)\n",
             0,
             96000 * 4,
         );
@@ -842,7 +842,7 @@ mod tests {
     fn swing_acts_on_rev_swapped_positions() {
         // rev maps step i -> 3-i: ". x . x" -> hits at 0,2 (even, unswung).
         let tl = src2timeline_v11(
-            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \". x . x\" >> rev swing=0.25\n",
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \". x . x\" | rev swing=0.25\n",
             &HashMap::new(),
             &HashMap::new(),
             24000,
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(offsets, vec![0, 12000]);
         // "x . x ." -> rev -> hits at 1,3 (odd, swung +1500).
         let tl = src2timeline_v11(
-            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" >> rev swing=0.25\n",
+            "tempo 480\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" | rev swing=0.25\n",
             &HashMap::new(),
             &HashMap::new(),
             24000,

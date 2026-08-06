@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn all_samples_are_finite() {
-        let src = "tempo 120\nlet kick = kick()\nlet snare = snare()\nlet hat = hat()\nlet bass = bass()\nlet lead = lead()\nloop \"b\":\n    kick << \"x . . x . . x .\"\n    snare << \"x\" >> every(4, rev)\n    hat << \"x . x . x . x .\"\n    bass << ([c2, f2], \"x . . x\")\n    lead << [c4, e4, g4] >> rev\n";
+        let src = "tempo 120\nlet kick = kick()\nlet snare = snare()\nlet hat = hat()\nlet bass = bass()\nlet lead = lead()\nloop \"b\":\n    kick << \"x . . x . . x .\"\n    snare << \"x\" | every(4, rev)\n    hat << \"x . x . x . x .\"\n    bass << ([c2, f2], \"x . . x\")\n    lead << [c4, e4, g4] | rev\n";
         let out = render(src, 384000);
         assert!(out.iter().all(|s| s.is_finite()));
         let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));

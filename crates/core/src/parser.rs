@@ -565,7 +565,7 @@ tempo 120
 let kick = kick()
 loop "beat" tempo=90:
     kick << "x . . x . . x ."
-    lead << [c4, e4, g4] >> every(4, rev)
+    lead << [c4, e4, g4] | every(4, rev)
 "#;
         let program = parse(&lex(src).unwrap()).unwrap();
         assert_eq!(program.statements.len(), 3);
@@ -676,7 +676,7 @@ loop "beat" tempo=90:
 
     #[test]
     fn params_after_combinators() {
-        let src = "loop \"a\":\n    kick << \"x . x .\" >> every(2, rev) pan=-0.5\n";
+        let src = "loop \"a\":\n    kick << \"x . x .\" | every(2, rev) pan=-0.5\n";
         let program = parse(&lex(src).unwrap()).unwrap();
         let Stmt::Loop(l) = &program.statements[0] else {
             panic!()
@@ -806,7 +806,7 @@ loop "beat" tempo=90:
     #[test]
     fn params_before_combinator_is_parse_error() {
         let err =
-            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5 >> rev\n").unwrap()).unwrap_err();
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5 | rev\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.message, "parameters must come after combinators");
     }
