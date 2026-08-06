@@ -54,19 +54,27 @@ impl<'a> Parser<'a> {
             ));
         };
         self.advance();
-        if self.peek_kind() == &TokenKind::Colon {
-            self.advance();
-            let TokenKind::Number(b) = self.peek_kind().clone() else {
-                return Err(Error::new(
-                    self.span(),
-                    ErrorKind::Parse,
-                    "expected ramp end after ':'",
-                ));
-            };
-            self.advance();
-            Ok(Param::Ramp(a as f32, b as f32))
-        } else {
-            Ok(Param::Const(a as f32))
+        match self.peek_kind() {
+            TokenKind::DotDot => {
+                self.advance();
+                let TokenKind::Number(b) = self.peek_kind().clone() else {
+                    return Err(Error::new(
+                        self.span(),
+                        ErrorKind::Parse,
+                        "expected ramp end after '..'",
+                    )
+                    .with_hint("ramps have two endpoints: pan=0.5..0.6"));
+                };
+                self.advance();
+                Ok(Param::Ramp(a as f32, b as f32))
+            }
+            TokenKind::Colon => Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "ramp uses '..' now",
+            )
+            .with_hint("write pan=-0.5..0.5 instead of pan=-0.5:0.5")),
+            _ => Ok(Param::Const(a as f32)),
         }
     }
 
@@ -246,6 +254,14 @@ impl<'a> Parser<'a> {
                 ));
             }
             *slot = Some(value);
+        }
+        if self.peek_kind() == &TokenKind::DotDot {
+            return Err(Error::new(
+                self.span(),
+                ErrorKind::Parse,
+                "unexpected '..'",
+            )
+            .with_hint("ramps have two endpoints: pan=0.5..0.6"));
         }
         if self.peek_kind() == &TokenKind::Pipe {
             return Err(Error::new(
@@ -812,9 +828,34 @@ loop "beat" tempo=90:
     }
 
     #[test]
+    fn old_colon_ramp_rejected_with_hint() {
+        let err =
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:1\n").unwrap()).unwrap_err();
+        assert!(err.message.contains(".."));
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
+    fn spaced_ramp_parses() {
+        let src = "loop \"a\":\n    kick << \"x\" pan=0.5 .. 0.6\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[0] else {
+            panic!()
+        };
+        assert_eq!(l.binds[0].pan, Some(Param::Ramp(0.5, 0.6)));
+    }
+
+    #[test]
+    fn triple_dotdot_is_an_error_with_hint() {
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5..0.5..0.5\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.hint.is_some());
+    }
+
+    #[test]
     fn parses_ramp_params() {
         let src =
-            "loop \"a\":\n    kick << \"x . x .\" pan=0:1 vel=1:0 delay=0.2:0.5 reverb=0:0.1\n";
+            "loop \"a\":\n    kick << \"x . x .\" pan=0..1 vel=1..0 delay=0.2..0.5 reverb=0..0.1\n";
         let program = parse(&lex(src).unwrap()).unwrap();
         let Stmt::Loop(l) = &program.statements[0] else {
             panic!()
@@ -841,19 +882,19 @@ loop "beat" tempo=90:
     #[test]
     fn ramp_endpoints_validated() {
         assert_eq!(
-            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:2\n").unwrap())
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0..2\n").unwrap())
                 .unwrap_err()
                 .kind,
             ErrorKind::Parse
         );
         assert_eq!(
-            parse(&lex("loop \"a\":\n    kick << \"x\" vel=1:-0.5\n").unwrap())
+            parse(&lex("loop \"a\":\n    kick << \"x\" vel=1..-0.5\n").unwrap())
                 .unwrap_err()
                 .kind,
             ErrorKind::Parse
         );
         assert_eq!(
-            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:1:2\n").unwrap())
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0..1..2\n").unwrap())
                 .unwrap_err()
                 .kind,
             ErrorKind::Parse
@@ -863,7 +904,7 @@ loop "beat" tempo=90:
     #[test]
     fn tone_params_reject_ramps_and_ranges() {
         assert_eq!(
-            parse(&lex("loop \"a\":\n    kick << \"x\" bass=0:1\n").unwrap())
+            parse(&lex("loop \"a\":\n    kick << \"x\" bass=0..1\n").unwrap())
                 .unwrap_err()
                 .kind,
             ErrorKind::Parse
@@ -884,7 +925,7 @@ loop "beat" tempo=90:
 
     #[test]
     fn swing_ramp_is_parse_error() {
-        let err = parse(&lex("loop \"a\":\n    kick << \"x\" swing=0:1\n").unwrap()).unwrap_err();
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" swing=0..1\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err.message.contains("swing"));
     }

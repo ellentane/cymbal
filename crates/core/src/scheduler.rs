@@ -756,7 +756,7 @@ mod tests {
     #[test]
     fn ramp_params_resolve_per_step() {
         let tl = src2timeline_v11(
-            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x x x x\" pan=0:1 vel=1:0\n",
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x x x x\" pan=0..1 vel=1..0\n",
             &HashMap::new(),
             &HashMap::new(),
             96000,
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn single_step_ramp_uses_end_value() {
         let tl = src2timeline_v11(
-            "let kick = kick()\nloop \"b\":\n    kick << \"x\" pan=0:1\n",
+            "let kick = kick()\nloop \"b\":\n    kick << \"x\" pan=0..1\n",
             &HashMap::new(),
             &HashMap::new(),
             24000,
