@@ -34,15 +34,17 @@ pub fn parse(tokens: &[Token]) -> Result<Program> {
 fn resolve_names(program: Program) -> Result<Program> {
     use std::collections::HashMap;
     let mut raw: HashMap<String, Expr> = HashMap::new();
+    let mut declared: Vec<String> = Vec::new();
     for stmt in &program.statements {
         if let Stmt::Let { name, value, .. } = stmt {
             raw.insert(name.clone(), value.clone());
+            declared.push(name.clone());
         }
     }
     let candidates: Vec<&str> = VOICE_NAMES
         .iter()
         .copied()
-        .chain(raw.keys().map(|s| s.as_str()))
+        .chain(declared.iter().map(|s| s.as_str()))
         .collect();
 
     fn resolve_one(
@@ -50,18 +52,19 @@ fn resolve_names(program: Program) -> Result<Program> {
         raw: &HashMap<String, Expr>,
         candidates: &[&str],
         stack: &mut Vec<String>,
+        span: Span,
     ) -> Result<Expr> {
         match raw.get(name) {
-            Some(Expr::Name(inner, span)) => {
+            Some(Expr::Name(inner, inner_span)) => {
                 if stack.contains(&name.to_string()) {
                     return Err(Error::new(
-                        *span,
+                        *inner_span,
                         ErrorKind::Parse,
                         format!("cycle in let names: {}", stack.join(" -> ")),
                     ));
                 }
                 stack.push(name.to_string());
-                let r = resolve_one(inner, raw, candidates, stack);
+                let r = resolve_one(inner, raw, candidates, stack, *inner_span);
                 stack.pop();
                 r
             }
@@ -69,7 +72,7 @@ fn resolve_names(program: Program) -> Result<Program> {
             None => match builtin_voice(name) {
                 Some(kind) => Ok(Expr::Voice(kind, Span { line: 1, col: 1 })),
                 None => Err(Error::new(
-                    Span { line: 1, col: 1 },
+                    span,
                     ErrorKind::Parse,
                     format!("unknown voice '{name}'"),
                 )
@@ -82,8 +85,14 @@ fn resolve_names(program: Program) -> Result<Program> {
         }
     }
 
-    for name in raw.keys() {
-        resolve_one(name, &raw, &candidates, &mut Vec::new())?;
+    for stmt in &program.statements {
+        if let Stmt::Let { name, value, .. } = stmt {
+            let span = match value {
+                Expr::Name(_, s) => *s,
+                _ => Span { line: 1, col: 1 },
+            };
+            resolve_one(name, &raw, &candidates, &mut Vec::new(), span)?;
+        }
     }
 
     let mut statements = Vec::new();
@@ -94,14 +103,7 @@ fn resolve_names(program: Program) -> Result<Program> {
                     if let Expr::Name(n, span) = &bind.voice {
                         let n = n.clone();
                         let span = *span;
-                        bind.voice = match resolve_one(&n, &raw, &candidates, &mut Vec::new())
-                        {
-                            Ok(e) => e,
-                            Err(mut e) => {
-                                e.span = span;
-                                return Err(e);
-                            }
-                        };
+                        bind.voice = resolve_one(&n, &raw, &candidates, &mut Vec::new(), span)?;
                     }
                     if let Expr::Name(n, span) = &bind.pattern {
                         return Err(Error::new(
@@ -229,12 +231,7 @@ impl<'a> Parser<'a> {
             return Err(Error::new(self.span(), ErrorKind::Parse, "expected '='"));
         }
         self.advance();
-        let mut value = self.parse_expr()?;
-        if let Expr::Name(n, nspan) = &value
-            && let Some(kind) = builtin_voice(n)
-        {
-            value = Expr::Voice(kind, *nspan);
-        }
+        let value = self.parse_expr()?;
         Ok(Stmt::Let { name, value, span })
     }
 
@@ -580,21 +577,20 @@ impl<'a> Parser<'a> {
                         return Err(Error::new(self.span(), ErrorKind::Parse, "expected ')'"));
                     }
                     self.advance();
-                    let kind = match name.as_str() {
-                        "kick" => VoiceKind::Kick,
-                        "snare" => VoiceKind::Snare,
-                        "hat" => VoiceKind::Hat,
-                        "bass" => VoiceKind::Bass,
-                        "lead" => VoiceKind::Lead,
-                        other => {
-                            return Err(Error::new(
+                    return match builtin_voice(&name) {
+                        Some(kind) => Ok(Expr::Voice(kind, span)),
+                        None => {
+                            let mut err = Error::new(
                                 span,
                                 ErrorKind::Parse,
-                                format!("unknown voice '{other}'"),
-                            ));
+                                format!("unknown voice '{name}'"),
+                            );
+                            if let Some(close) = nearest(VOICE_NAMES, &name) {
+                                err = err.with_hint(format!("did you mean '{close}'?"));
+                            }
+                            Err(err)
                         }
                     };
-                    return Ok(Expr::Voice(kind, span));
                 }
                 if self.peek_kind() == &TokenKind::Assign {
                     let mut err = Error::new(
@@ -1118,11 +1114,28 @@ loop "beat" tempo=90:
     }
 
     #[test]
+    fn bare_alias_of_redeclared_builtin_resolves_declared() {
+        let src = "let kick = lead()\nlet bass = kick\nloop \"l\":\n    bass << \"x\"\n";
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let Stmt::Loop(l) = &program.statements[2] else {
+            panic!()
+        };
+        assert!(matches!(l.binds[0].voice, Expr::Voice(VoiceKind::Lead, _)));
+    }
+
+    #[test]
     fn let_cycles_are_errors() {
         let src = "let a = b\nlet b = a\nloop \"l\":\n    a << \"x\"\n";
         let err = parse(&lex(src).unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err.message.contains("cycle"));
+    }
+
+    #[test]
+    fn bare_self_alias_is_cycle_error() {
+        let err = parse(&lex("let kick = kick\n").unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err.message.contains("cycle in let names: kick"));
     }
 
     #[test]
