@@ -994,6 +994,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         KeyCode::Enter if help_open => {}
                         KeyCode::Backspace if help_open => {}
                         KeyCode::Tab if help_open => {}
+                        KeyCode::Left if help_open => {}
+                        KeyCode::Right if help_open => {}
+                        KeyCode::Home if help_open => {}
+                        KeyCode::End if help_open => {}
                         KeyCode::Tab => {
                             if let Some((cands, idx)) = &mut completion {
                                 *idx = (*idx + 1) % cands.len();

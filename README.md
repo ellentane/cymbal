@@ -83,8 +83,8 @@ loop "beat":
   `x+2` / `x-2` transpose a hit by ±2 semitones. Transposes work on every
   voice: pitched voices transpose, kick/snare shift their body pitch, hats
   ignore it.
-- `help <topic>` shows a one-liner for any symbol, param, keyword, or voice —
-  its output opens the F1 panel. `help bass` resolves to the EQ param (params
+- `help <topic>` shows that topic's entry for any symbol, param, keyword, or
+  voice — its output opens the F1 panel. `help bass` resolves to the EQ param (params
   win over the voice of the same name). `cymbal docs` prints the full cheat
   sheet.
 
@@ -92,7 +92,7 @@ loop "beat":
 
 | Key | Action |
 |---|---|
-| F1 / Esc | toggle the help panel — Up/Down scroll, editing keys are swallowed while open |
+| F1 / Esc | F1 opens/closes the help panel, Esc closes — arrows scroll, editing keys are swallowed while open |
 | Tab | autocomplete at the cursor — Tab cycles, Enter accepts, Esc closes |
 | Ctrl-S | reload the file — only changed loops rebuild, notes already sounding on unchanged loops keep playing |
 | Ctrl-= / Ctrl-- | raise / lower tempo; forces a full reload of every loop |
