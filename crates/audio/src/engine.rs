@@ -379,9 +379,17 @@ impl Engine {
         };
         if seq <= self.last_swap_seq {
             self.retired.lock().unwrap().push(tl);
+            // Accepted bounded dealloc on the audio thread: a stale swap's
+            // spares drop here, bounded to stale-seq anomalies (a newer swap
+            // already applied). Plan-accepted; the pin test counts
+            // allocations only, so the dealloc keeps ALLOCS == 0.
             return;
         }
         self.last_swap_seq = seq;
+        // Accepted bounded dealloc on the audio thread: spares beyond the
+        // watermark drop here, bounded to a single reload carrying more
+        // recorder Arcs than SPARE_WATERMARK. Plan-accepted; the pin test
+        // counts allocations only, so the dealloc keeps ALLOCS == 0.
         for s in spares {
             if self.spares.len() < SPARE_WATERMARK {
                 self.spares.push(s);
