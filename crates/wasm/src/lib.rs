@@ -47,11 +47,11 @@ mod tests {
     #[wasm_bindgen_test]
     fn serialize_round_trips() {
         let bytes = serialize_timeline(SRC, 4).unwrap();
-        let events = engine::deserialize_events(&bytes);
+        let events = engine::deserialize_events(&bytes).unwrap();
         // 4s at 120bpm = 2 bars: kick "x . . x" -> 4 kicks, hat "x . x ." -> 4 hats
         assert_eq!(events.len(), 8);
-        assert_eq!(events[0].1, cymbal_core::ast::VoiceKind::Kick as u8);
-        assert_eq!(events[1].1, cymbal_core::ast::VoiceKind::Hat as u8);
+        assert_eq!(events[0].voice, cymbal_core::ast::VoiceKind::Kick as u8);
+        assert_eq!(events[1].voice, cymbal_core::ast::VoiceKind::Hat as u8);
     }
 
     #[wasm_bindgen_test]
@@ -136,15 +136,15 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn deserialize_events_tolerates_short_input() {
-        assert!(engine::deserialize_events(&[]).is_empty());
-        assert!(engine::deserialize_events(&[0u8; 16]).is_empty());
-        assert!(engine::deserialize_events(&[0u8; 20]).is_empty());
-        let mut bytes = vec![0u8; 48];
-        bytes[8..16].copy_from_slice(&2u64.to_le_bytes());
-        assert_eq!(engine::deserialize_events(&bytes).len(), 1);
+    fn deserialize_events_rejects_malformed_input() {
+        assert!(engine::deserialize_events(&[]).is_err());
+        assert!(engine::deserialize_events(&[0u8; 16]).unwrap().is_empty());
+        assert!(engine::deserialize_events(&[0u8; 20]).is_err());
+        let mut bytes = vec![0u8; 16 + 64];
+        bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+        assert_eq!(engine::deserialize_events(&bytes).unwrap().len(), 1);
         let mut bytes = vec![0u8; 16];
         bytes[8..16].copy_from_slice(&1_000_000u64.to_le_bytes());
-        assert!(engine::deserialize_events(&bytes).is_empty());
+        assert!(engine::deserialize_events(&bytes).is_err());
     }
 }

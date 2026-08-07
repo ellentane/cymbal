@@ -1,18 +1,19 @@
-//! The worklet engine intentionally skips `Master` (no delay/reverb in wasm v1)
-//! and skips FX sends: `l.tanh()`/`r.tanh()` only.
+//! The worklet engine skips `Master` (no delay/reverb in wasm v1) and skips FX
+//! sends: `l.tanh()`/`r.tanh()` only.
 
-//! `semitone` is applied; `bass`/`treble`/`comp`/sample params are ignored
-//! (not serialized).
+//! `semitone` is applied; `bass`/`treble`/`comp`/sample fields are carried on
+//! the wire but not applied yet (D2/D3).
 
 use cymbal_core::ast::VoiceKind;
 use cymbal_core::dsp::{Voice, VoiceParams};
 use cymbal_core::scheduler::Timeline;
 
-/// Fixed 32-byte record: offset u64, voice u8, pitch i16 (-1 = none),
-/// semitone i16, velocity f32, duration u64, pan f32, pad 3.
-/// Delay/reverb sends are not serialized (the worklet engine has no sends).
+/// Fixed 64-byte record (LE): offset u64, voice u8, pitch i16 (-1 = none),
+/// semitone i16, velocity f32, duration u64, pan f32, delay f32, reverb f32,
+/// bass f32, treble f32, comp f32, sample_id u16, start f32 (0..1), end f32
+/// (0..1), cycle u8, pad 4.
 pub fn serialize(tl: &Timeline) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + tl.events.len() * 32);
+    let mut out = Vec::with_capacity(16 + tl.events.len() * 64);
     out.extend_from_slice(&tl.bar_samples.to_le_bytes());
     out.extend_from_slice(&(tl.events.len() as u64).to_le_bytes());
     for ev in &tl.events {
@@ -23,25 +24,80 @@ pub fn serialize(tl: &Timeline) -> Vec<u8> {
         out.extend_from_slice(&ev.velocity.to_le_bytes());
         out.extend_from_slice(&ev.duration.to_le_bytes());
         out.extend_from_slice(&ev.pan.to_le_bytes());
-        out.extend_from_slice(&[0u8; 3]);
+        out.extend_from_slice(&ev.delay_send.to_le_bytes());
+        out.extend_from_slice(&ev.reverb_send.to_le_bytes());
+        out.extend_from_slice(&ev.bass.to_le_bytes());
+        out.extend_from_slice(&ev.treble.to_le_bytes());
+        out.extend_from_slice(&ev.comp.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(ev.sample_start as f32).to_le_bytes());
+        out.extend_from_slice(&(ev.sample_end as f32).to_le_bytes());
+        out.push(ev.sample_loop as u8);
+        out.extend_from_slice(&[0u8; 4]);
     }
     out
 }
 
-pub fn deserialize_events(bytes: &[u8]) -> Vec<(u64, u8)> {
-    if bytes.len() < 16 {
-        return Vec::new();
+#[derive(Debug)]
+pub struct WireEvent {
+    pub sample_offset: u64,
+    pub voice: u8,
+    pub pitch: Option<u8>,
+    pub semitone: i16,
+    pub velocity: f32,
+    pub duration: u64,
+    pub pan: f32,
+    pub delay_send: f32,
+    pub reverb_send: f32,
+    pub bass: f32,
+    pub treble: f32,
+    pub comp: f32,
+    pub sample_id: u16,
+    pub start: f32,
+    pub end: f32,
+    pub cycle: u8,
+}
+
+pub fn deserialize_events(bytes: &[u8]) -> Result<Vec<WireEvent>, &'static str> {
+    if bytes.len() < 16 || !(bytes.len() - 16).is_multiple_of(64) {
+        return Err("wire data: payload not a multiple of the 64-byte record stride");
     }
     let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    let Some(records_len) = count.checked_mul(64) else {
+        return Err("wire data: record count overflow");
+    };
+    if records_len != bytes.len() - 16 {
+        return Err("wire data: record count does not match payload length");
+    }
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
-        if bytes.len() < 16 + i * 32 + 32 {
-            break;
-        }
-        let rec = &bytes[16 + i * 32..16 + (i + 1) * 32];
-        out.push((u64::from_le_bytes(rec[0..8].try_into().unwrap()), rec[8]));
+        let rec = &bytes[16 + i * 64..16 + (i + 1) * 64];
+        let pitch = {
+            let p = i16::from_le_bytes(rec[9..11].try_into().unwrap());
+            if p >= 0 { Some(p as u8) } else { None }
+        };
+        let velocity = f32::from_le_bytes(rec[13..17].try_into().unwrap());
+        let pan = f32::from_le_bytes(rec[25..29].try_into().unwrap());
+        out.push(WireEvent {
+            sample_offset: u64::from_le_bytes(rec[0..8].try_into().unwrap()),
+            voice: rec[8],
+            pitch,
+            semitone: i16::from_le_bytes(rec[11..13].try_into().unwrap()),
+            velocity: if velocity.is_finite() { velocity } else { 0.0 },
+            duration: u64::from_le_bytes(rec[17..25].try_into().unwrap()),
+            pan: if pan.is_finite() { pan } else { 0.0 },
+            delay_send: f32::from_le_bytes(rec[29..33].try_into().unwrap()),
+            reverb_send: f32::from_le_bytes(rec[33..37].try_into().unwrap()),
+            bass: f32::from_le_bytes(rec[37..41].try_into().unwrap()),
+            treble: f32::from_le_bytes(rec[41..45].try_into().unwrap()),
+            comp: f32::from_le_bytes(rec[45..49].try_into().unwrap()),
+            sample_id: u16::from_le_bytes(rec[49..51].try_into().unwrap()),
+            start: f32::from_le_bytes(rec[51..55].try_into().unwrap()),
+            end: f32::from_le_bytes(rec[55..59].try_into().unwrap()),
+            cycle: rec[59],
+        });
     }
-    out
+    Ok(out)
 }
 
 struct Ev {
@@ -99,20 +155,14 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
     if bar_samples == 0 {
         return;
     }
-    eng.bar_samples = bar_samples;
-    let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-    let Some(records_len) = count.checked_mul(32) else {
+    let Ok(events) = deserialize_events(bytes) else {
         return;
     };
-    if 16 + records_len > len {
-        return;
-    }
+    eng.bar_samples = bar_samples;
     eng.future.clear();
     eng.active.clear();
-    for i in 0..(records_len / 32) {
-        let rec = &bytes[16 + i * 32..16 + (i + 1) * 32];
-        let offset = u64::from_le_bytes(rec[0..8].try_into().unwrap());
-        let kind = match rec[8] {
+    for w in events {
+        let kind = match w.voice {
             0 => VoiceKind::Kick,
             1 => VoiceKind::Snare,
             2 => VoiceKind::Hat,
@@ -120,25 +170,15 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
             4 => VoiceKind::Lead,
             _ => continue,
         };
-        let pitch = {
-            let p = i16::from_le_bytes(rec[9..11].try_into().unwrap());
-            if p >= 0 { Some(p as u8) } else { None }
-        };
-        let semitone = i16::from_le_bytes(rec[11..13].try_into().unwrap()) as i32;
-        let velocity = f32::from_le_bytes(rec[13..17].try_into().unwrap());
-        let velocity = if velocity.is_finite() { velocity } else { 0.0 };
-        let duration = u64::from_le_bytes(rec[17..25].try_into().unwrap());
-        let pan = f32::from_le_bytes(rec[25..29].try_into().unwrap());
-        let pan = if pan.is_finite() { pan } else { 0.0 };
         eng.future.push((
-            offset,
+            w.sample_offset,
             Ev {
                 kind,
-                pitch,
-                semitone,
-                velocity,
-                duration,
-                pan,
+                pitch: w.pitch,
+                semitone: w.semitone as i32,
+                velocity: w.velocity,
+                duration: w.duration,
+                pan: w.pan,
             },
         ));
     }
@@ -220,5 +260,75 @@ pub extern "C" fn eng_in_ptr(len: usize) -> *mut u8 {
             v.resize(len, 0);
         }
         v.as_mut_ptr()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cymbal_core::scheduler::Event;
+
+    fn timeline_with(ev: Event) -> Timeline {
+        Timeline {
+            events: vec![ev],
+            generation: 0,
+            tempo: 120.0,
+            bar_samples: 48000,
+            sample_rate: 48000,
+            loops: Vec::new(),
+            loop_generations: Vec::new(),
+            midi: Vec::new(),
+            window_start: 0,
+            window_len: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn wire_v2_round_trips_fx_and_sample_fields() {
+        let ev = Event {
+            sample_offset: 123456,
+            loop_name: String::new(),
+            loop_index: 0,
+            voice: VoiceKind::Bass,
+            pitch: Some(60),
+            semitone: 2,
+            velocity: 0.8,
+            duration: 14400,
+            generation: 0,
+            pan: 0.1,
+            delay_send: 0.3,
+            reverb_send: 0.4,
+            bass: 0.5,
+            treble: 0.6,
+            comp: 0.7,
+            sample: None,
+            sample_start: 0.25,
+            sample_end: 0.75,
+            sample_loop: true,
+        };
+        let bytes = serialize(&timeline_with(ev));
+        let events = deserialize_events(&bytes).expect("well-formed wire data");
+        assert_eq!(events.len(), 1);
+        let w = &events[0];
+        assert_eq!(w.sample_offset, 123456);
+        assert_eq!(w.voice, VoiceKind::Bass as u8);
+        assert_eq!(w.pitch, Some(60));
+        assert_eq!(w.semitone, 2);
+        assert_eq!(w.velocity, 0.8_f32);
+        assert_eq!(w.duration, 14400);
+        assert_eq!(w.pan, 0.1_f32);
+        assert_eq!(w.delay_send, 0.3_f32);
+        assert_eq!(w.reverb_send, 0.4_f32);
+        assert_eq!(w.bass, 0.5_f32);
+        assert_eq!(w.treble, 0.6_f32);
+        assert_eq!(w.comp, 0.7_f32);
+        assert_eq!(w.sample_id, 0, "registry ids land in D3; 0 for now");
+        assert_eq!(w.start, 0.25_f32);
+        assert_eq!(w.end, 0.75_f32);
+        assert_eq!(w.cycle, 1);
+        assert!(
+            deserialize_events(&bytes[..bytes.len() - 1]).is_err(),
+            "wrong-size records must be rejected"
+        );
     }
 }
