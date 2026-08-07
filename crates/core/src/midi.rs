@@ -113,6 +113,8 @@ mod tests {
             loops: vec!["b".into()],
             loop_generations: vec![("b".into(), 0)],
             midi: vec![],
+            window_start: 0,
+            window_len: u64::MAX,
         }
     }
 

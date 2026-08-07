@@ -42,6 +42,9 @@ pub struct Engine {
     next_bar_abs: u64,
     timeline_origin: u64,
     last_swap_seq: u64,
+    window_end_abs: u64,
+    last_bar_in_window: u64,
+    segment_requested: bool,
     pending: Option<(Arc<Timeline>, u64, Vec<Arc<Recorder>>)>,
     timeline: Option<Arc<Timeline>>,
     active: Vec<Active>,
@@ -75,6 +78,9 @@ impl Engine {
             next_bar_abs: 0,
             timeline_origin: 0,
             last_swap_seq: 0,
+            window_end_abs: u64::MAX,
+            last_bar_in_window: 0,
+            segment_requested: false,
             pending: None,
             timeline: None,
             active: Vec::with_capacity(512),
@@ -126,6 +132,15 @@ impl Engine {
                     self.midi_dropped_reported = self.midi_dropped;
                     if let Some(ui) = &self.ui {
                         ui.try_push(UiEvent::MidiDropped(self.midi_dropped));
+                    }
+                }
+                if !self.segment_requested
+                    && self.window_end_abs != u64::MAX
+                    && self.bar_count >= self.last_bar_in_window
+                {
+                    self.segment_requested = true;
+                    if let Some(ui) = &self.ui {
+                        ui.try_push(UiEvent::NeedSegment(self.window_end_abs));
                     }
                 }
                 self.bar_count += 1;
@@ -343,6 +358,12 @@ impl Engine {
         let old_tl = self.timeline.replace(tl.clone());
         self.timeline_origin = now;
         self.bar_samples = tl.bar_samples;
+        self.window_end_abs = tl.window_start.saturating_add(tl.window_len);
+        self.last_bar_in_window = self
+            .window_end_abs
+            .saturating_div(tl.bar_samples)
+            .saturating_sub(1);
+        self.segment_requested = false;
         self.master.set_bar_samples(tl.bar_samples);
         self.event_cursor = 0;
         self.midi_cursor = 0;
@@ -497,6 +518,8 @@ mod tests {
             loops: loop_generations.iter().map(|(n, _)| n.clone()).collect(),
             loop_generations,
             midi: vec![],
+            window_start: 0,
+            window_len: u64::MAX,
         })
     }
 
@@ -1648,6 +1671,8 @@ mod tests {
             loops: vec!["b".into()],
             loop_generations: vec![("b".into(), 0)],
             midi: vec![],
+            window_start: 0,
+            window_len: u64::MAX,
         });
         let mut engine = Engine::new(120.0, 48000);
         engine.submit_swap(tl, 1, vec![]);
@@ -1695,6 +1720,49 @@ mod tests {
         }
         assert!(!pulses.contains(&24000), "boundary pulse is skipped");
         assert!(pulses.contains(&24125));
+    }
+
+    #[test]
+    fn segment_request_fires_in_last_bar() {
+        // windowed timeline: [0, 2 bars); process a bar so we sit in bar 1,
+        // the last bar of the window; the boundary entering bar 1 must push
+        // exactly one NeedSegment carrying the window end.
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        let mut tl = (*tl(vec![], 0, vec![("b".into(), 0)], 24000)).clone();
+        tl.window_start = 0;
+        tl.window_len = 24000 * 2;
+        engine.submit_swap(Arc::new(tl), 1, vec![]);
+        engine_step(&mut engine, 24000);
+        engine_step(&mut engine, 24000);
+        let mut segments = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::NeedSegment(end) = ev {
+                segments.push(end);
+            }
+        }
+        assert_eq!(
+            segments,
+            vec![48000],
+            "one request with the window end, fired in the last bar"
+        );
+    }
+
+    #[test]
+    fn single_shot_timeline_never_requests_segments() {
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
+        engine_step(&mut engine, 24000 * 4);
+        let mut segments = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::NeedSegment(end) = ev {
+                segments.push(end);
+            }
+        }
+        assert!(segments.is_empty(), "u64::MAX window = no segments");
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod status;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,8 @@ use status::Status;
 const MAX_SAMPLES: u64 = 3600 * 48000;
 const SAMPLE_RATE: u32 = 48000;
 const RENDER_DEFAULT_SECONDS: u64 = 120;
+const WINDOW_SECS: u64 = 300;
+const WINDOW_LEN: u64 = WINDOW_SECS * SAMPLE_RATE as u64;
 
 enum UiMsg {
     Err(Error, Option<u64>),
@@ -44,6 +47,11 @@ enum UiMsg {
         generations: HashMap<String, u64>,
         loops: Vec<String>,
         seq: u64,
+        window_end: u64,
+        src: String,
+    },
+    SegmentDone {
+        window_end: Option<u64>,
     },
 }
 
@@ -397,10 +405,13 @@ fn spawn_reload(
             match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                 Ok(tl) => {
                     let needed = spares_needed(&names, &latest);
+                    let window_end = tl.window_start.saturating_add(tl.window_len);
                     let _ = msg_tx.send(UiMsg::Reloaded {
                         generations: gens,
                         loops: names,
                         seq,
+                        window_end,
+                        src: src.clone(),
                     });
                     if let Some(text) = cymbal_core::docs::help_text_src(&src) {
                         let _ = msg_tx.send(UiMsg::Help(text));
@@ -422,6 +433,92 @@ fn spawn_reload(
         Err(e) => {
             let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
         }
+    });
+}
+
+fn align_window_end(raw_end: u64, bars: &[u64]) -> u64 {
+    bars.iter()
+        .fold(raw_end, |end, b| end.max(raw_end / *b * *b + *b))
+}
+
+fn loop_bar_samples(program: &cymbal_core::ast::Program) -> Vec<u64> {
+    use cymbal_core::ast::Stmt;
+    use cymbal_core::transport::Transport;
+    let tempo = program
+        .statements
+        .iter()
+        .find_map(|s| {
+            if let Stmt::Tempo(t, _) = s {
+                Some(Transport::new(*t, SAMPLE_RATE).tempo)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(120.0);
+    let mut bars = vec![Transport::new(tempo, SAMPLE_RATE).bar_samples()];
+    for stmt in &program.statements {
+        if let Stmt::Loop(l) = stmt {
+            bars.push(Transport::new(l.tempo.unwrap_or(tempo), SAMPLE_RATE).bar_samples());
+        }
+    }
+    bars
+}
+
+struct SegmentRequest {
+    end: u64,
+    src: String,
+    base: std::path::PathBuf,
+    latest: HashMap<String, u64>,
+    recording: bool,
+    seq: u64,
+}
+
+fn spawn_segment(
+    req: SegmentRequest,
+    reload_seq: Arc<AtomicU64>,
+    msg_tx: mpsc::Sender<UiMsg>,
+    queue: Arc<AudioQueue>,
+) {
+    std::thread::spawn(move || {
+        let result: Result<Option<u64>, Error> = (|| -> Result<Option<u64>, Error> {
+            let program = parse(&lex(&req.src)?)?;
+            let samples = samples::load_samples(&program, &req.base)?;
+            let names: Vec<String> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    cymbal_core::ast::Stmt::Loop(l) => Some(l.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            let gens = next_loop_generations(&req.latest, &names);
+            let raw_end = req.end.saturating_add(WINDOW_LEN);
+            let window_end = align_window_end(raw_end, &loop_bar_samples(&program));
+            let tl = cymbal_core::scheduler::schedule_window(
+                &program,
+                &gens,
+                &samples,
+                req.end,
+                window_end - req.end,
+                SAMPLE_RATE,
+            )?;
+            let spares: Vec<_> = if req.recording {
+                (0..spares_needed(&names, &req.latest))
+                    .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if reload_seq.load(Ordering::SeqCst) <= req.seq {
+                let _ = queue.send(Msg::Swap(Arc::new(tl), req.seq, spares));
+                Ok(Some(window_end))
+            } else {
+                Ok(None)
+            }
+        })();
+        let _ = msg_tx.send(UiMsg::SegmentDone {
+            window_end: result.ok().flatten(),
+        });
     });
 }
 
@@ -708,6 +805,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let base = file.parent().unwrap_or_else(|| std::path::Path::new("."));
     let initial =
         build_timeline_with(&src, SAMPLE_RATE, base, &HashMap::new()).map_err(|e| e.to_string())?;
+    let initial_window_end = initial.window_start.saturating_add(initial.window_len);
     let mut latest_loops: HashMap<String, u64> = initial.loop_generations.iter().cloned().collect();
     let mut status = Status::new();
     status.loops = initial.loops.clone();
@@ -756,7 +854,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
-    let mut editor = Editor::new(src);
+    let mut editor = Editor::new(src.clone());
+    let mut applied_src = src;
 
     let mut recording = false;
     let mut help_open = false;
@@ -766,7 +865,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut midi_sending = false;
     let mut record_start: Option<Instant> = None;
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    let mut reload_seq: u64 = 1;
+    let reload_seq = Arc::new(AtomicU64::new(1));
+    let mut reload_in_flight = false;
+    let mut segment_in_flight = false;
+    let mut last_window_end = initial_window_end;
     let mut latest_seq: u64 = 0;
     let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
     let mut pending: PendingClaims = HashMap::new();
@@ -785,8 +887,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             let src = editor.content();
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                             let latest = latest_loops.clone();
-                            reload_seq += 1;
-                            let seq = reload_seq;
+                            reload_in_flight = true;
+                            let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
                             spawn_reload(
                                 src,
                                 base,
@@ -954,8 +1056,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
-                            reload_seq += 1;
-                            let seq = reload_seq;
+                            reload_in_flight = true;
+                            let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
                             spawn_reload(
                                 src,
                                 base,
@@ -974,8 +1076,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
-                            reload_seq += 1;
-                            let seq = reload_seq;
+                            reload_in_flight = true;
+                            let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
                             spawn_reload(
                                 src,
                                 base,
@@ -1004,8 +1106,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 let base =
                                     file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                                 let latest = latest_loops.clone();
-                                reload_seq += 1;
-                                let seq = reload_seq;
+                                reload_in_flight = true;
+                                let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
                                 spawn_reload(
                                     editor.content(),
                                     base,
@@ -1093,7 +1195,14 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         generations,
                         loops,
                         seq,
+                        window_end,
+                        src,
                     } => {
+                        reload_in_flight = false;
+                        if seq > latest_seq {
+                            last_window_end = window_end;
+                            applied_src = src;
+                        }
                         handle_reloaded(
                             &mut status,
                             &mut latest_loops,
@@ -1144,6 +1253,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         status.recording = false;
                     }
                     UiMsg::Err(e, seq) => {
+                        if seq.is_some() {
+                            reload_in_flight = false;
+                        }
                         if let Some(seq) = seq {
                             for (loop_index, _, rec) in drain_pending(&mut pending, seq) {
                                 match flush_claim(seq, loop_index, &recent, record_ts.is_some()) {
@@ -1166,6 +1278,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     UiMsg::Help(text) => {
                         help_override = Some(text);
                         help_open = true;
+                    }
+                    UiMsg::SegmentDone { window_end } => {
+                        segment_in_flight = false;
+                        if let Some(end) = window_end {
+                            last_window_end = end;
+                        }
                     }
                     m => apply_ui_msg(&mut status, m),
                 }
@@ -1211,6 +1329,26 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                         ClaimAction::Ignore => {}
                     },
+                    cymbal_audio::ui_queue::UiEvent::NeedSegment(end) => {
+                        if end != last_window_end || segment_in_flight || reload_in_flight {
+                            continue;
+                        }
+                        segment_in_flight = true;
+                        let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                        spawn_segment(
+                            SegmentRequest {
+                                end,
+                                src: applied_src.clone(),
+                                base: base.to_path_buf(),
+                                latest: latest_loops.clone(),
+                                recording,
+                                seq,
+                            },
+                            reload_seq.clone(),
+                            msg_tx.clone(),
+                            queue.clone(),
+                        );
+                    }
                 }
             }
             if recording && let Some(start) = record_start {
@@ -2172,6 +2310,33 @@ mod tests {
         let old: HashMap<String, u64> = ["a", "b"].iter().map(|n| (n.to_string(), 1)).collect();
         let new_names: Vec<String> = ["a", "b"].iter().map(|n| n.to_string()).collect();
         assert_eq!(spares_needed(&new_names, &old), 8);
+    }
+
+    #[test]
+    fn window_end_rounds_up_to_every_loop_bar() {
+        // 120bpm global bar 96000, 240bpm loop bar 48000: raw end 100000 must
+        // move to the next global multiple (192000), which also clears 144000.
+        let bars = vec![96000, 48000];
+        assert_eq!(align_window_end(100_000, &bars), 192_000);
+        assert_eq!(align_window_end(200_000, &bars), 288_000);
+    }
+
+    #[test]
+    fn window_end_extends_already_aligned_ends() {
+        // an end already on the grid still moves to the next multiple: the
+        // window is [start, end), so a hit exactly at the raw end belongs to
+        // the next window and must not be scheduled by this one.
+        assert_eq!(align_window_end(96_000, &[96_000]), 192_000);
+    }
+
+    #[test]
+    fn loop_bar_samples_reads_per_loop_tempos() {
+        let program = parse(
+            &lex("tempo 120\nlet kick = kick()\nloop \"b\" tempo=240:\n    kick << \"x\"\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(loop_bar_samples(&program), vec![96000, 48000]);
     }
 
     #[test]

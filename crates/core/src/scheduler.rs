@@ -65,6 +65,8 @@ pub struct Timeline {
     pub loops: Vec<String>,
     pub loop_generations: Vec<(String, u64)>,
     pub midi: Vec<crate::midi::MidiEvent>,
+    pub window_start: u64,
+    pub window_len: u64,
 }
 
 pub fn schedule(
@@ -74,14 +76,17 @@ pub fn schedule(
     max_samples: u64,
     sample_rate: u32,
 ) -> Result<Timeline> {
-    schedule_window(
+    let mut tl = schedule_window(
         program,
         loop_generations,
         samples,
         0,
         max_samples,
         sample_rate,
-    )
+    )?;
+    tl.window_start = 0;
+    tl.window_len = u64::MAX;
+    Ok(tl)
 }
 
 /// Schedules the program's events inside [window_start, window_start + window_len).
@@ -262,6 +267,8 @@ pub fn schedule_window(
         loops: loops.clone(),
         loop_generations: loop_gens.clone(),
         midi: vec![],
+        window_start,
+        window_len,
     });
     Ok(Timeline {
         events,
@@ -272,6 +279,8 @@ pub fn schedule_window(
         loops,
         loop_generations: loop_gens,
         midi,
+        window_start,
+        window_len,
     })
 }
 

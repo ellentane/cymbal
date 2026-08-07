@@ -62,6 +62,8 @@ mod tests {
             loops: vec![],
             loop_generations: vec![],
             midi: vec![],
+            window_start: 0,
+            window_len: u64::MAX,
         })
     }
 
