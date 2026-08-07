@@ -119,13 +119,22 @@ impl Engine {
             .unwrap()
     }
 
-    pub(crate) fn take_retired_into(&self, n: usize, mut push: impl FnMut(Arc<Timeline>)) -> usize {
+    pub(crate) fn take_retired_into(
+        &self,
+        n: usize,
+        mut push: impl FnMut(Arc<Timeline>) -> Result<(), Arc<Timeline>>,
+    ) -> usize {
         let mut v = self.retired.lock().unwrap();
         let n = n.min(v.len());
-        for tl in v.drain(..n) {
-            push(tl);
+        let mut pushed = 0;
+        for _ in 0..n {
+            let tl = v.remove(0);
+            match push(tl) {
+                Ok(()) => pushed += 1,
+                Err(tl) => v.push(tl),
+            }
         }
-        n
+        pushed
     }
 
     pub fn set_midi(&mut self, midi: Option<Arc<MidiOut>>) {
@@ -1658,7 +1667,7 @@ mod tests {
         engine.submit_swap(tl_b, 2, vec![]);
         engine.process(&mut out);
         engine.take_retired_into(retired_q.retired_available(), |tl| {
-            let _ = retired_q.push_retired(tl);
+            retired_q.push_retired(tl)
         });
         engine.submit_swap(tl_c, 3, refill);
         engine.process(&mut out);
@@ -2191,7 +2200,9 @@ mod tests {
         let q = AudioQueue::new(4);
         assert_eq!(q.retired_available(), 4, "empty queue has every slot free");
         let n = engine.take_retired_into(q.retired_available(), |tl| {
-            assert!(q.push_retired(tl), "the drain stays within the free slots");
+            let r = q.push_retired(tl);
+            assert!(r.is_ok(), "the drain stays within the free slots");
+            r
         });
         assert_eq!(n, 4, "only the free queue slots are drained");
         assert_eq!(
@@ -2210,6 +2221,71 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![4],
             "the overflow stays in the engine slot, in order"
+        );
+    }
+
+    #[test]
+    fn retired_bridge_never_drops_on_a_full_queue() {
+        let mut engine = Engine::new(120.0, 48000);
+        let mut out = vec![0.0f32; 24000 * 2];
+        let timelines: Vec<_> = (0..6).map(|g| tl(vec![], g, vec![], 24000)).collect();
+        for (i, t) in timelines.iter().enumerate() {
+            engine.submit_swap(t.clone(), i as u64 + 1, vec![]);
+            engine.process(&mut out);
+        }
+        let q = AudioQueue::new(4);
+        for g in 0..4 {
+            assert!(
+                q.push_retired(tl(vec![], g, vec![], 24000)).is_ok(),
+                "prefill the queue up to capacity"
+            );
+        }
+        assert_eq!(q.retired_available(), 0, "the queue is full");
+        let mut failures = 0;
+        let pushed =
+            engine.take_retired_into(q.retired_available(), |tl| match q.push_retired(tl) {
+                Ok(()) => Ok(()),
+                Err(tl) => {
+                    failures += 1;
+                    Err(tl)
+                }
+            });
+        assert_eq!(pushed, 0, "a full queue must drain nothing");
+        assert_eq!(
+            failures, 0,
+            "the bridge must not attempt an impossible push"
+        );
+        let drained = q.take_retired();
+        assert_eq!(drained.len(), 4, "the consumer drains the queue");
+        let pushed = engine.take_retired_into(q.retired_available(), |tl| q.push_retired(tl));
+        assert_eq!(
+            pushed, 4,
+            "exactly the free slots are drained and pushed back"
+        );
+        assert_eq!(q.take_retired().len(), 4, "every pushed timeline made it");
+        assert_eq!(
+            engine.take_retired().len(),
+            1,
+            "the remainder stays in the engine for the next drain"
+        );
+    }
+
+    #[test]
+    fn failed_retired_push_returns_to_the_engine() {
+        let mut engine = Engine::new(120.0, 48000);
+        let mut out = vec![0.0f32; 24000 * 2];
+        let timelines: Vec<_> = (0..3).map(|g| tl(vec![], g, vec![], 24000)).collect();
+        for (i, t) in timelines.iter().enumerate() {
+            engine.submit_swap(t.clone(), i as u64 + 1, vec![]);
+            engine.process(&mut out);
+        }
+        let pushed = engine.take_retired_into(usize::MAX, Err);
+        assert_eq!(pushed, 0, "every push failed");
+        let retired = engine.take_retired();
+        assert_eq!(
+            retired.iter().map(|t| t.generation).collect::<Vec<_>>(),
+            vec![0, 1],
+            "failed pushes return to the engine slot in order, never dropped"
         );
     }
 }

@@ -46,8 +46,8 @@ impl AudioQueue {
         self.fifo.pop().or_else(|| self.latest_swap.pop())
     }
 
-    pub fn push_retired(&self, tl: Arc<Timeline>) -> bool {
-        self.retired.push(tl).is_ok()
+    pub fn push_retired(&self, tl: Arc<Timeline>) -> Result<(), Arc<Timeline>> {
+        self.retired.push(tl)
     }
 
     pub fn retired_available(&self) -> usize {
@@ -194,8 +194,8 @@ mod tests {
         let q = AudioQueue::new(4);
         let a = tl(1);
         let b = tl(2);
-        assert!(q.push_retired(a.clone()));
-        assert!(q.push_retired(b.clone()));
+        assert!(q.push_retired(a.clone()).is_ok());
+        assert!(q.push_retired(b.clone()).is_ok());
         let retired = q.take_retired();
         assert_eq!(retired.len(), 2);
         assert!(Arc::ptr_eq(&retired[0], &a));
@@ -204,14 +204,36 @@ mod tests {
     }
 
     #[test]
+    fn retired_queue_holds_exactly_capacity_elements() {
+        // crossbeam-queue semantics pin: `capacity()` is the exact maximum
+        // number of elements, not the classic ring-buffer cap-1.
+        let q = AudioQueue::new(4);
+        for i in 0..4 {
+            assert!(
+                q.push_retired(tl(i as u64)).is_ok(),
+                "every one of the `capacity` pushes must succeed"
+            );
+        }
+        assert_eq!(
+            q.retired_available(),
+            0,
+            "a full queue reports zero free slots"
+        );
+        assert!(
+            q.push_retired(tl(99)).is_err(),
+            "the (capacity+1)th push must fail"
+        );
+    }
+
+    #[test]
     fn retired_overflow_is_bounded() {
         let q = AudioQueue::new(2);
-        assert!(q.push_retired(tl(1)));
-        assert!(q.push_retired(tl(2)));
-        assert!(q.push_retired(tl(3)));
-        assert!(q.push_retired(tl(4)));
+        assert!(q.push_retired(tl(1)).is_ok());
+        assert!(q.push_retired(tl(2)).is_ok());
+        assert!(q.push_retired(tl(3)).is_ok());
+        assert!(q.push_retired(tl(4)).is_ok());
         assert!(
-            !q.push_retired(tl(5)),
+            q.push_retired(tl(5)).is_err(),
             "overflowing the retired slot reports failure instead of allocating"
         );
     }
@@ -220,7 +242,7 @@ mod tests {
     fn retired_available_tracks_free_slots() {
         let q = AudioQueue::new(4);
         assert_eq!(q.retired_available(), 4);
-        assert!(q.push_retired(tl(1)));
+        assert!(q.push_retired(tl(1)).is_ok());
         assert_eq!(q.retired_available(), 3);
         let drained = q.take_retired();
         assert_eq!(drained.len(), 1);
