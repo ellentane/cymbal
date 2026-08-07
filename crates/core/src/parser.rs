@@ -1,5 +1,5 @@
 use crate::ast::{BindStmt, Combinator, Expr, LoopStmt, Note, Param, Program, Stmt, VoiceKind};
-use crate::docs::{nearest, PARAM_NAMES, VOICE_NAMES};
+use crate::docs::{PARAM_NAMES, VOICE_NAMES, nearest};
 use crate::error::{Error, ErrorKind, Result, Span};
 use crate::lexer::{Token, TokenKind};
 
@@ -71,16 +71,16 @@ fn resolve_names(program: Program) -> Result<Program> {
             Some(other) => Ok(other.clone()),
             None => match builtin_voice(name) {
                 Some(kind) => Ok(Expr::Voice(kind, Span { line: 1, col: 1 })),
-                None => Err(Error::new(
-                    span,
-                    ErrorKind::Parse,
-                    format!("unknown voice '{name}'"),
-                )
-                .with_hint(
-                    nearest(candidates, name)
-                        .map(|n| format!("did you mean '{n}'?"))
-                        .unwrap_or_else(|| "declare it with let, e.g. let kick = kick()".to_string()),
-                )),
+                None => Err(
+                    Error::new(span, ErrorKind::Parse, format!("unknown voice '{name}'"))
+                        .with_hint(
+                            nearest(candidates, name)
+                                .map(|n| format!("did you mean '{n}'?"))
+                                .unwrap_or_else(|| {
+                                    "declare it with let, e.g. let kick = kick()".to_string()
+                                }),
+                        ),
+                ),
             },
         }
     }
@@ -111,7 +111,9 @@ fn resolve_names(program: Program) -> Result<Program> {
                             ErrorKind::Parse,
                             format!("'{n}' is not a pattern"),
                         )
-                        .with_hint("patterns are quoted strings or note arrays: kick << \"x\" or [c4, e4]"));
+                        .with_hint(
+                            "patterns are quoted strings or note arrays: kick << \"x\" or [c4, e4]",
+                        ));
                     }
                 }
                 statements.push(Stmt::Loop(l));
@@ -172,12 +174,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Param::Ramp(a as f32, b as f32))
             }
-            TokenKind::Colon => Err(Error::new(
-                self.span(),
-                ErrorKind::Parse,
-                "ramp uses '..' now",
-            )
-            .with_hint("write pan=-0.5..0.5 instead of pan=-0.5:0.5")),
+            TokenKind::Colon => {
+                Err(
+                    Error::new(self.span(), ErrorKind::Parse, "ramp uses '..' now")
+                        .with_hint("write pan=-0.5..0.5 instead of pan=-0.5:0.5"),
+                )
+            }
             _ => Ok(Param::Const(a as f32)),
         }
     }
@@ -244,23 +246,48 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Some(name)
             }
-            TokenKind::Rev => { self.advance(); Some("rev".to_string()) }
-            TokenKind::Every => { self.advance(); Some("every".to_string()) }
-            TokenKind::Let => { self.advance(); Some("let".to_string()) }
-            TokenKind::Loop => { self.advance(); Some("loop".to_string()) }
-            TokenKind::Tempo => { self.advance(); Some("tempo".to_string()) }
-            TokenKind::Help => { self.advance(); Some("help".to_string()) }
-            TokenKind::Pipe => { self.advance(); Some("|".to_string()) }
-            TokenKind::Bind => { self.advance(); Some("<<".to_string()) }
-            TokenKind::DotDot => { self.advance(); Some("..".to_string()) }
+            TokenKind::Rev => {
+                self.advance();
+                Some("rev".to_string())
+            }
+            TokenKind::Every => {
+                self.advance();
+                Some("every".to_string())
+            }
+            TokenKind::Let => {
+                self.advance();
+                Some("let".to_string())
+            }
+            TokenKind::Loop => {
+                self.advance();
+                Some("loop".to_string())
+            }
+            TokenKind::Tempo => {
+                self.advance();
+                Some("tempo".to_string())
+            }
+            TokenKind::Help => {
+                self.advance();
+                Some("help".to_string())
+            }
+            TokenKind::Pipe => {
+                self.advance();
+                Some("|".to_string())
+            }
+            TokenKind::Bind => {
+                self.advance();
+                Some("<<".to_string())
+            }
+            TokenKind::DotDot => {
+                self.advance();
+                Some("..".to_string())
+            }
             TokenKind::Newline | TokenKind::Eof => None,
             _ => {
-                return Err(Error::new(
-                    self.span(),
-                    ErrorKind::Parse,
-                    "expected a help topic",
-                )
-                .with_hint("write help pan, help rev, help |, or quote glyphs: help \"*\""));
+                return Err(
+                    Error::new(self.span(), ErrorKind::Parse, "expected a help topic")
+                        .with_hint("write help pan, help rev, help |, or quote glyphs: help \"*\""),
+                );
             }
         };
         Ok(Stmt::Help(topic, span))
@@ -340,15 +367,9 @@ impl<'a> Parser<'a> {
             )
             .with_hint("notes come first after '<<': lead << [c2, f2] \"x . x .\""));
         }
-        if matches!(voice, Expr::Name(..))
-            && matches!(self.peek_kind(), TokenKind::String(_))
-        {
-            return Err(Error::new(
-                self.span(),
-                ErrorKind::Parse,
-                "expected '<<'",
-            )
-            .with_hint("did you mean 'sample'? write sample \"path\" <<"));
+        if matches!(voice, Expr::Name(..)) && matches!(self.peek_kind(), TokenKind::String(_)) {
+            return Err(Error::new(self.span(), ErrorKind::Parse, "expected '<<'")
+                .with_hint("did you mean 'sample'? write sample \"path\" <<"));
         }
         if self.peek_kind() != &TokenKind::Bind {
             return Err(Error::new(self.span(), ErrorKind::Parse, "expected '<<'"));
@@ -419,12 +440,8 @@ impl<'a> Parser<'a> {
             *slot = Some(value);
         }
         if self.peek_kind() == &TokenKind::DotDot {
-            return Err(Error::new(
-                self.span(),
-                ErrorKind::Parse,
-                "unexpected '..'",
-            )
-            .with_hint("ramps have two endpoints: pan=0.5..0.6"));
+            return Err(Error::new(self.span(), ErrorKind::Parse, "unexpected '..'")
+                .with_hint("ramps have two endpoints: pan=0.5..0.6"));
         }
         if self.peek_kind() == &TokenKind::Pipe {
             return Err(Error::new(
@@ -746,8 +763,14 @@ loop "beat" tempo=90:
             l.binds[0].pattern,
             Expr::Tuple(
                 vec![
-                    Note { midi: 36, span: Span { line: 2, col: 14 } },
-                    Note { midi: 41, span: Span { line: 2, col: 18 } },
+                    Note {
+                        midi: 36,
+                        span: Span { line: 2, col: 14 }
+                    },
+                    Note {
+                        midi: 41,
+                        span: Span { line: 2, col: 18 }
+                    },
                 ],
                 "x . x .".into(),
                 Span { line: 2, col: 13 }
@@ -757,7 +780,8 @@ loop "beat" tempo=90:
 
     #[test]
     fn tuple_parens_rejected_with_hint() {
-        let err = parse(&lex("loop \"a\":\n    bass << ([c2, f2], \"x . x .\")\n").unwrap()).unwrap_err();
+        let err =
+            parse(&lex("loop \"a\":\n    bass << ([c2, f2], \"x . x .\")\n").unwrap()).unwrap_err();
         assert!(err.message.contains("parens"));
         assert!(err.hint.is_some());
     }
@@ -771,7 +795,8 @@ loop "beat" tempo=90:
 
     #[test]
     fn rhythm_first_rejected_with_hint() {
-        let err = parse(&lex("loop \"a\":\n    kick << \"x . x .\" [c2, f2]\n").unwrap()).unwrap_err();
+        let err =
+            parse(&lex("loop \"a\":\n    kick << \"x . x .\" [c2, f2]\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err.message.contains("before notes") || err.message.contains("first"));
         assert!(err.hint.is_some());
@@ -1018,8 +1043,7 @@ loop "beat" tempo=90:
 
     #[test]
     fn old_colon_ramp_rejected_with_hint() {
-        let err =
-            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:1\n").unwrap()).unwrap_err();
+        let err = parse(&lex("loop \"a\":\n    kick << \"x\" pan=0:1\n").unwrap()).unwrap_err();
         assert!(err.message.contains(".."));
         assert!(err.hint.is_some());
     }
@@ -1036,7 +1060,8 @@ loop "beat" tempo=90:
 
     #[test]
     fn triple_dotdot_is_an_error_with_hint() {
-        let err = parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5..0.5..0.5\n").unwrap()).unwrap_err();
+        let err =
+            parse(&lex("loop \"a\":\n    kick << \"x\" pan=0.5..0.5..0.5\n").unwrap()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err.hint.is_some());
     }
@@ -1222,7 +1247,8 @@ loop "beat" tempo=90:
 
     #[test]
     fn unknown_let_name_suggests_closest() {
-        let err = parse(&lex("let a = kick()\nloop \"l\":\n    q << \"x\"\n").unwrap()).unwrap_err();
+        let err =
+            parse(&lex("let a = kick()\nloop \"l\":\n    q << \"x\"\n").unwrap()).unwrap_err();
         assert!(err.message.contains("q"));
         assert!(err.hint.is_some());
     }
@@ -1260,7 +1286,8 @@ loop "beat" tempo=90:
 
     #[test]
     fn sample_typo_before_string_hints() {
-        let err = parse(&lex("loop \"a\":\n    smaple \"x\" << \"x . x .\"\n").unwrap()).unwrap_err();
+        let err =
+            parse(&lex("loop \"a\":\n    smaple \"x\" << \"x . x .\"\n").unwrap()).unwrap_err();
         assert!(err.hint.is_some());
     }
 

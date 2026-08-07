@@ -81,8 +81,7 @@ mod tests {
 
     #[test]
     fn error_displays_hint() {
-        let e = Error::new(Span { line: 1, col: 3 }, ErrorKind::Lex, "bad")
-            .with_hint("use '|'");
+        let e = Error::new(Span { line: 1, col: 3 }, ErrorKind::Lex, "bad").with_hint("use '|'");
         assert_eq!(
             e.to_string(),
             "line 1, col 3: lex error: bad (hint: use '|')"

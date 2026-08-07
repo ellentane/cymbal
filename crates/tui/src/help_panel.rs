@@ -3,7 +3,10 @@ use cymbal_core::docs;
 const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl-S", "reload — only changed loops rebuild"),
     ("Ctrl-= / Ctrl--", "raise / lower tempo (full reload)"),
-    ("Alt-R / Alt-H / Alt-[ / Alt-]", "reverse / half-speed / rotate the line"),
+    (
+        "Alt-R / Alt-H / Alt-[ / Alt-]",
+        "reverse / half-speed / rotate the line",
+    ),
     ("Ctrl-R", "toggle recording"),
     ("Ctrl-J", "MIDI start/stop"),
     ("Ctrl-E", "export to out.wav"),
@@ -52,7 +55,10 @@ pub fn help_panel_text(cursor: Option<(&str, usize)>) -> String {
     for section in docs::sections() {
         out.push_str(&format!("{}\n", section.title));
         for e in section.entries {
-            out.push_str(&format!("  {} — {} ({})\n", e.name, e.description, e.example));
+            out.push_str(&format!(
+                "  {} — {} ({})\n",
+                e.name, e.description, e.example
+            ));
         }
     }
     out.push_str("Keybindings\n");

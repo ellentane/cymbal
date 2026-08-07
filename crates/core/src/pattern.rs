@@ -607,26 +607,81 @@ mod tests {
         assert_eq!(
             expand_string("x*0.5 . x+3 . x-2").unwrap(),
             vec![
-                Hit { on: true, velocity: 0.5, semitone: 0 },
-                Hit { on: false, velocity: 1.0, semitone: 0 },
-                Hit { on: true, velocity: 1.0, semitone: 3 },
-                Hit { on: false, velocity: 1.0, semitone: 0 },
-                Hit { on: true, velocity: 1.0, semitone: -2 },
+                Hit {
+                    on: true,
+                    velocity: 0.5,
+                    semitone: 0
+                },
+                Hit {
+                    on: false,
+                    velocity: 1.0,
+                    semitone: 0
+                },
+                Hit {
+                    on: true,
+                    velocity: 1.0,
+                    semitone: 3
+                },
+                Hit {
+                    on: false,
+                    velocity: 1.0,
+                    semitone: 0
+                },
+                Hit {
+                    on: true,
+                    velocity: 1.0,
+                    semitone: -2
+                },
             ]
         );
     }
 
     #[test]
     fn modifiers_combine_order_free() {
-        assert_eq!(expand_string("x+2*0.5").unwrap()[0], Hit { on: true, velocity: 0.5, semitone: 2 });
-        assert_eq!(expand_string("x*0.5+2").unwrap()[0], Hit { on: true, velocity: 0.5, semitone: 2 });
+        assert_eq!(
+            expand_string("x+2*0.5").unwrap()[0],
+            Hit {
+                on: true,
+                velocity: 0.5,
+                semitone: 2
+            }
+        );
+        assert_eq!(
+            expand_string("x*0.5+2").unwrap()[0],
+            Hit {
+                on: true,
+                velocity: 0.5,
+                semitone: 2
+            }
+        );
     }
 
     #[test]
     fn repeats_accumulate() {
-        assert_eq!(expand_string("x+2+3").unwrap()[0], Hit { on: true, velocity: 1.0, semitone: 5 });
-        assert_eq!(expand_string("x*0.5*0.7").unwrap()[0], Hit { on: true, velocity: 0.35, semitone: 0 });
-        assert_eq!(expand_string("x+2-3").unwrap()[0], Hit { on: true, velocity: 1.0, semitone: -1 });
+        assert_eq!(
+            expand_string("x+2+3").unwrap()[0],
+            Hit {
+                on: true,
+                velocity: 1.0,
+                semitone: 5
+            }
+        );
+        assert_eq!(
+            expand_string("x*0.5*0.7").unwrap()[0],
+            Hit {
+                on: true,
+                velocity: 0.35,
+                semitone: 0
+            }
+        );
+        assert_eq!(
+            expand_string("x+2-3").unwrap()[0],
+            Hit {
+                on: true,
+                velocity: 1.0,
+                semitone: -1
+            }
+        );
     }
 
     #[test]
@@ -662,11 +717,31 @@ mod tests {
         assert_eq!(
             expand_string("x+2. x+3.x").unwrap(),
             vec![
-                Hit { on: true, velocity: 1.0, semitone: 2 },
-                Hit { on: false, velocity: 1.0, semitone: 0 },
-                Hit { on: true, velocity: 1.0, semitone: 3 },
-                Hit { on: false, velocity: 1.0, semitone: 0 },
-                Hit { on: true, velocity: 1.0, semitone: 0 },
+                Hit {
+                    on: true,
+                    velocity: 1.0,
+                    semitone: 2
+                },
+                Hit {
+                    on: false,
+                    velocity: 1.0,
+                    semitone: 0
+                },
+                Hit {
+                    on: true,
+                    velocity: 1.0,
+                    semitone: 3
+                },
+                Hit {
+                    on: false,
+                    velocity: 1.0,
+                    semitone: 0
+                },
+                Hit {
+                    on: true,
+                    velocity: 1.0,
+                    semitone: 0
+                },
             ]
         );
     }

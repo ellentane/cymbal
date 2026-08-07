@@ -238,8 +238,7 @@ mod tests {
         // 8 steps over one 48000-sample bar: step 6000; lead duration 9600.
         // At frame 2000 the active voices are step 0 (pan -1) -> L. At frame
         // 34000 the active voice is step 5 (pan -1 + 2*5/7 = 0.43) -> R.
-        let src =
-            "tempo 240\nlet lead = lead()\nloop \"b\":\n    lead << \"x x x x x x x x\" pan=-1..1\n";
+        let src = "tempo 240\nlet lead = lead()\nloop \"b\":\n    lead << \"x x x x x x x x\" pan=-1..1\n";
         let out = render(src, 48000);
         let l = out[2000 * 2];
         let r = out[2000 * 2 + 1];

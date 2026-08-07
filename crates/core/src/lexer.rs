@@ -232,12 +232,9 @@ impl Lexer {
                 _ if c.is_ascii_alphabetic() => return self.lex_ident(span),
                 _ => {
                     let hint = matches!(c, '*' | '+')
-                    .then(|| "glyphs are quoted in help topics: help \".\"");
-                    let mut err = Error::new(
-                        span,
-                        ErrorKind::Lex,
-                        format!("unexpected character '{c}'"),
-                    );
+                        .then(|| "glyphs are quoted in help topics: help \".\"");
+                    let mut err =
+                        Error::new(span, ErrorKind::Lex, format!("unexpected character '{c}'"));
                     if let Some(h) = hint {
                         err = err.with_hint(h);
                     }

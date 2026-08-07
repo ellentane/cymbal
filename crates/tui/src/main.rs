@@ -503,9 +503,7 @@ fn parse_args(args: &[String]) -> ParsedArgs<'_> {
     }
 }
 
-const COMPLETION_KEYWORDS: &[&str] = &[
-    "let", "loop", "tempo", "sample", "help", "rev", "every(",
-];
+const COMPLETION_KEYWORDS: &[&str] = &["let", "loop", "tempo", "sample", "help", "rev", "every("];
 
 fn note_names() -> Vec<String> {
     let mut out = Vec::new();
@@ -564,7 +562,11 @@ fn word_prefix(line: &str, col: usize) -> Option<String> {
         .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_' && *c != '#')
         .map_or(0, |(i, c)| i + c.len_utf8());
     let word = &before[start_byte..];
-    if word.is_empty() { None } else { Some(word.to_string()) }
+    if word.is_empty() {
+        None
+    } else {
+        Some(word.to_string())
+    }
 }
 
 fn voice_names(src: &str) -> Vec<String> {
@@ -1008,7 +1010,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 let (col, line_idx) = editor.cursor();
                                 let prefix = word_prefix(&editor.lines()[line_idx], col);
                                 let cands = prefix
-                                    .map(|p| completion_candidates(&p, &voice_names(&editor.content())))
+                                    .map(|p| {
+                                        completion_candidates(&p, &voice_names(&editor.content()))
+                                    })
                                     .unwrap_or_default();
                                 if !cands.is_empty() {
                                     completion = Some((cands, 0));
@@ -1196,10 +1200,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     let text = match &help_override {
                         Some(t) => t.clone(),
                         None => {
-                            let cursor_line = editor
-                                .lines()
-                                .get(editor.cursor().1)
-                                .map(|l| l.as_str());
+                            let cursor_line =
+                                editor.lines().get(editor.cursor().1).map(|l| l.as_str());
                             let cursor_col = editor.cursor().0;
                             help_panel::help_panel_text(cursor_line.map(|l| (l, cursor_col)))
                         }
@@ -2037,7 +2039,10 @@ mod tests {
 
     #[test]
     fn word_before_cursor_extracts_prefix() {
-        assert_eq!(word_prefix("    kick << \"x\" ve", 18), Some("ve".to_string()));
+        assert_eq!(
+            word_prefix("    kick << \"x\" ve", 18),
+            Some("ve".to_string())
+        );
         assert_eq!(word_prefix("kick", 4), Some("kick".to_string()));
         assert_eq!(word_prefix("  ", 2), None);
     }
@@ -2050,6 +2055,9 @@ mod tests {
     #[test]
     fn voice_names_from_src() {
         let src = "let kick = kick()\nlet clap = sample \"clap\"\n";
-        assert_eq!(voice_names(src), vec!["kick".to_string(), "clap".to_string()]);
+        assert_eq!(
+            voice_names(src),
+            vec!["kick".to_string(), "clap".to_string()]
+        );
     }
 }

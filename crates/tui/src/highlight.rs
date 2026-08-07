@@ -12,9 +12,12 @@ pub enum Class {
 
 pub fn classify(kind: &TokenKind) -> Class {
     match kind {
-        TokenKind::Let | TokenKind::Loop | TokenKind::Tempo | TokenKind::Rev | TokenKind::Every | TokenKind::Help => {
-            Class::Keyword
-        }
+        TokenKind::Let
+        | TokenKind::Loop
+        | TokenKind::Tempo
+        | TokenKind::Rev
+        | TokenKind::Every
+        | TokenKind::Help => Class::Keyword,
         TokenKind::Ident(s) if s == "sample" => Class::Keyword,
         TokenKind::String(_) => Class::Pattern,
         TokenKind::Note(_) => Class::Note,
