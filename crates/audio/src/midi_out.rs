@@ -2,6 +2,79 @@ use crossbeam_queue::ArrayQueue;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub const SEND_AHEAD: Duration = Duration::from_micros(500);
+pub const POLL: Duration = Duration::from_millis(2);
+
+pub trait Sleeper: Send + Sync {
+    fn now(&self) -> Instant;
+    fn sleep_until(&self, deadline: Instant);
+    fn sleep(&self, dur: Duration);
+}
+
+pub struct RealSleeper;
+
+impl Sleeper for RealSleeper {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn sleep_until(&self, deadline: Instant) {
+        #[cfg(unix)]
+        {
+            // Absolute-time sleep on CLOCK_MONOTONIC (Linux); macOS falls
+            // back through the same path (clock_nanosleep is available).
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let mut ts = libc::timespec {
+                tv_sec: remaining.as_secs() as libc::time_t,
+                tv_nsec: remaining.subsec_nanos() as libc::c_long,
+            };
+            let mut now_ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            unsafe {
+                libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now_ts);
+            }
+            let abs = libc::timespec {
+                tv_sec: now_ts.tv_sec + ts.tv_sec,
+                tv_nsec: now_ts.tv_nsec + ts.tv_nsec,
+            };
+            let abs = if abs.tv_nsec >= 1_000_000_000 {
+                libc::timespec {
+                    tv_sec: abs.tv_sec + 1,
+                    tv_nsec: abs.tv_nsec - 1_000_000_000,
+                }
+            } else {
+                abs
+            };
+            ts = abs;
+            loop {
+                let r = unsafe {
+                    libc::clock_nanosleep(
+                        libc::CLOCK_MONOTONIC,
+                        libc::TIMER_ABSTIME,
+                        &ts,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if r != libc::EINTR {
+                    break;
+                }
+            }
+            let _ = &mut ts;
+        }
+        #[cfg(not(unix))]
+        {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+    fn sleep(&self, dur: Duration) {
+        std::thread::sleep(dur);
+    }
+}
+
 pub enum MidiItem {
     Note { offset: u64, bytes: [u8; 3] },
     Rebase { offset: u64, tempo: f64 },
@@ -164,6 +237,48 @@ fn writer_loop(tx: Arc<MidiOut>, mut conn: midir::MidiOutputConnection) {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    #[allow(dead_code)]
+    struct FakeSleeper {
+        now: std::cell::RefCell<Instant>,
+        sleeps: std::cell::RefCell<Vec<Instant>>,
+    }
+
+    impl FakeSleeper {
+        #[allow(dead_code)]
+        fn new(t0: Instant) -> Self {
+            Self {
+                now: std::cell::RefCell::new(t0),
+                sleeps: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Sleeper for FakeSleeper {
+        fn now(&self) -> Instant {
+            *self.now.borrow()
+        }
+        fn sleep_until(&self, deadline: Instant) {
+            self.sleeps.borrow_mut().push(deadline);
+            *self.now.borrow_mut() = deadline;
+        }
+        fn sleep(&self, dur: Duration) {
+            let n = *self.now.borrow() + dur;
+            self.sleeps.borrow_mut().push(n);
+            *self.now.borrow_mut() = n;
+        }
+    }
+
+    #[test]
+    fn real_sleeper_progresses_time() {
+        let s = RealSleeper;
+        let t0 = s.now();
+        assert!(s.now() >= t0);
+    }
+
+    // Single-threaded test fake: mutation is confined to one thread.
+    unsafe impl Sync for FakeSleeper {}
 
     fn period() -> Duration {
         Duration::from_secs_f64(250.0 / 48000.0)

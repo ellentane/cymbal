@@ -385,6 +385,7 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "cymbal-core",
+ "libc",
  "midir",
 ]
 

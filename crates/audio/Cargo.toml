@@ -12,3 +12,6 @@ cpal = "0.16"
 crossbeam-queue = "0.3"
 cymbal-core = { path = "../core" }
 midir = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
