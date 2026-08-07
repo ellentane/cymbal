@@ -118,13 +118,13 @@ pub enum MidiItem {
 }
 
 pub struct MidiOut {
-    tx: ArrayQueue<MidiItem>,
+    tx: Arc<ArrayQueue<MidiItem>>,
 }
 
 impl MidiOut {
     pub fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            tx: ArrayQueue::new(capacity),
+            tx: Arc::new(ArrayQueue::new(capacity)),
         })
     }
 
@@ -188,7 +188,7 @@ impl MidiOut {
     /// the connection) and streams note/clock messages. If the port is gone
     /// the thread exits silently; audio is unaffected.
     pub fn spawn_writer(self: Arc<Self>, port_name: &str) -> std::thread::JoinHandle<()> {
-        let tx = self.clone();
+        let tx = self.tx.clone();
         let port_name = port_name.to_string();
         std::thread::spawn(move || {
             raise_priority();
@@ -205,10 +205,13 @@ impl MidiOut {
                     .find(|p| midi_out.port_name(p).ok().as_deref() == Some(port_name.as_str()))
             };
             let Some(port) = port else { return };
-            let Ok(conn) = midi_out.connect(&port, "cymbal-out") else {
+            let Ok(mut conn) = midi_out.connect(&port, "cymbal-out") else {
                 return;
             };
-            writer_loop(tx, conn);
+            let mut send = |b: &[u8]| {
+                let _ = conn.send(b);
+            };
+            writer_loop(tx, &mut send, &RealSleeper);
         })
     }
 }
@@ -249,23 +252,90 @@ fn handle_item(
     }
 }
 
-fn writer_loop(tx: Arc<MidiOut>, mut conn: midir::MidiOutputConnection) {
-    let mut origin: Option<(u64, Instant)> = None;
-    let mut period = Duration::from_millis(500);
-    loop {
-        let Some(item) = tx.tx.pop() else {
-            std::thread::sleep(Duration::from_millis(2));
-            continue;
-        };
+fn dispatch_item(
+    item: MidiItem,
+    origin: Option<(u64, Instant)>,
+    period: Duration,
+    now: Instant,
+    send: &mut impl FnMut(&[u8]),
+) {
+    handle_item(item, origin, period, now, send);
+}
+
+struct WriterState {
+    origin: Option<(u64, Instant)>,
+    period: Duration,
+    deferred: Vec<(Instant, MidiItem)>,
+}
+
+impl WriterState {
+    fn new() -> Self {
+        Self {
+            origin: None,
+            period: Duration::from_millis(500),
+            deferred: Vec::new(),
+        }
+    }
+}
+
+fn writer_step(
+    rx: &ArrayQueue<MidiItem>,
+    send: &mut impl FnMut(&[u8]),
+    sleeper: &dyn Sleeper,
+    st: &mut WriterState,
+) {
+    while let Some(item) = rx.pop() {
         match item {
             MidiItem::Rebase { offset, tempo } => {
-                origin = Some((offset, Instant::now()));
-                period = Duration::from_secs_f64(60.0 / (tempo.max(1.0) * 24.0));
+                st.origin = Some((offset, sleeper.now()));
+                st.period = Duration::from_secs_f64(60.0 / (tempo.max(1.0) * 24.0));
+                st.deferred.clear();
             }
-            other => handle_item(other, origin, period, Instant::now(), &mut |b| {
-                let _ = conn.send(b);
-            }),
+            item => {
+                let Some((o0, t0)) = st.origin else {
+                    continue;
+                };
+                let (offset, clock) = match &item {
+                    MidiItem::Clock { offset } => (*offset, true),
+                    MidiItem::Note { offset, .. } => (*offset, false),
+                    MidiItem::Sys { .. } => (0, false),
+                    MidiItem::Rebase { .. } => unreachable!(),
+                };
+                let target =
+                    t0 + Duration::from_secs_f64((offset as f64 - o0 as f64).max(0.0) / 48000.0);
+                let deadline = if clock {
+                    target.checked_sub(SEND_AHEAD).unwrap_or(target)
+                } else {
+                    target
+                };
+                st.deferred.push((deadline, item));
+            }
         }
+    }
+    if st.deferred.is_empty() {
+        sleeper.sleep(POLL);
+        return;
+    }
+    st.deferred.sort_by_key(|(d, _)| *d);
+    let now = sleeper.now();
+    let mut due = 0;
+    while due < st.deferred.len() && st.deferred[due].0 <= now {
+        due += 1;
+    }
+    for (_, item) in st.deferred.drain(..due) {
+        dispatch_item(item, st.origin, st.period, now, send);
+    }
+    if let Some((next, _)) = st.deferred.first() {
+        sleeper.sleep_until(*next);
+    } else {
+        sleeper.sleep(POLL);
+    }
+}
+
+fn writer_loop(rx: Arc<ArrayQueue<MidiItem>>, send: &mut impl FnMut(&[u8]), sleeper: &dyn Sleeper) {
+    let mut st = WriterState::new();
+    loop {
+        writer_step(&rx, send, sleeper, &mut st);
     }
 }
 
@@ -464,5 +534,58 @@ mod tests {
             &mut sent,
         );
         assert_eq!(sent, vec![vec![0x90, 60, 100]]);
+    }
+
+    #[test]
+    fn clock_and_note_dispatch_in_one_wake() {
+        // Clock at t0+1ms (send-ahead deadline t0+0.5ms) and a note due at
+        // exactly that deadline: the clock's send-ahead wake must dispatch
+        // both in a single iteration.
+        let rx = Arc::new(ArrayQueue::new(16));
+        let _ = rx.push(MidiItem::Rebase {
+            offset: 0,
+            tempo: 120.0,
+        });
+        let _ = rx.push(MidiItem::Clock { offset: 48 });
+        let _ = rx.push(MidiItem::Note {
+            offset: 24,
+            bytes: [0x90, 60, 100],
+        });
+        let sleeper = FakeSleeper::new(Instant::now());
+        let mut sent: Vec<Vec<u8>> = Vec::new();
+        let mut st = WriterState::new();
+        writer_step(&rx, &mut |b| sent.push(b.to_vec()), &sleeper, &mut st);
+        assert!(sent.is_empty(), "nothing is due before the send-ahead wake");
+        writer_step(&rx, &mut |b| sent.push(b.to_vec()), &sleeper, &mut st);
+        assert_eq!(
+            sent.len(),
+            2,
+            "send-ahead wake must dispatch the clock and the note together"
+        );
+        assert_eq!(sent[0], vec![0xF8]);
+        assert_eq!(sent[1], vec![0x90, 60, 100]);
+    }
+
+    #[test]
+    fn high_tempo_clock_stream_never_skips() {
+        // 10000 bpm -> period = 60/(10000*24) = 250us < SEND_AHEAD, so each
+        // send-ahead deadline overlaps the previous tick's target. The drain
+        // loop must still dispatch every clock.
+        let rx = Arc::new(ArrayQueue::new(64));
+        let _ = rx.push(MidiItem::Rebase {
+            offset: 0,
+            tempo: 10_000.0,
+        });
+        for k in 1..=20 {
+            let _ = rx.push(MidiItem::Clock { offset: k * 19 });
+        }
+        let sleeper = FakeSleeper::new(Instant::now());
+        let mut sent: Vec<Vec<u8>> = Vec::new();
+        let mut st = WriterState::new();
+        for _ in 0..40 {
+            writer_step(&rx, &mut |b| sent.push(b.to_vec()), &sleeper, &mut st);
+        }
+        assert_eq!(sent.len(), 20, "every clock must dispatch");
+        assert!(sent.iter().all(|b| b == &vec![0xF8]));
     }
 }
