@@ -74,6 +74,27 @@ pub fn schedule(
     max_samples: u64,
     sample_rate: u32,
 ) -> Result<Timeline> {
+    schedule_window(
+        program,
+        loop_generations,
+        samples,
+        0,
+        max_samples,
+        sample_rate,
+    )
+}
+
+/// Schedules the program's events inside [window_start, window_start + window_len).
+/// Event offsets are relative to window_start; the engine adds the timeline
+/// origin at runtime. every(n) and the density cap use absolute bar indices.
+pub fn schedule_window(
+    program: &Program,
+    loop_generations: &HashMap<String, u64>,
+    samples: &HashMap<String, Arc<SampleData>>,
+    window_start: u64,
+    window_len: u64,
+    sample_rate: u32,
+) -> Result<Timeline> {
     let tempo = program
         .statements
         .iter()
@@ -87,6 +108,7 @@ pub fn schedule(
         .unwrap_or(120.0);
     let transport = Transport::new(tempo, sample_rate);
     let transport_bar = transport.bar_samples();
+    let window_end = window_start + window_len;
 
     let mut events = Vec::new();
     let mut loops = Vec::new();
@@ -116,7 +138,9 @@ pub fn schedule(
         loop_gens.push((loop_stmt.name.clone(), generation));
         let loop_tempo = loop_stmt.tempo.unwrap_or(tempo);
         let bar = Transport::new(loop_tempo, sample_rate).bar_samples();
-        let bars = max_samples.div_ceil(bar);
+        let start_bar = window_start / bar;
+        let end_bar = window_end.div_ceil(bar);
+        let bars = end_bar - start_bar;
 
         for bind in &loop_stmt.binds {
             let (voice, sample_data) = match &bind.voice {
@@ -150,7 +174,7 @@ pub fn schedule(
             }
             let step_samples = (bar / steps as u64).max(1);
 
-            for bar_idx in 0..bars {
+            for bar_idx in start_bar..end_bar {
                 let mut steps_vec: Vec<Option<pattern::Step>> = step_list.clone();
                 for comb in &bind.combinators {
                     steps_vec = apply_combinator(comb, steps_vec, bar_idx);
@@ -164,9 +188,10 @@ pub fn schedule(
                         let bar_start = (bar_idx * bar) as i64;
                         offset = shifted.clamp(bar_start, bar_start + bar as i64 - 1) as u64;
                     }
-                    if offset >= max_samples {
+                    if offset < window_start || offset >= window_end {
                         continue;
                     }
+                    let sample_offset = offset - window_start;
                     let velocity = (step.velocity * resolve_param(&bind.vel, 1.0, step_idx, steps))
                         .clamp(0.0, 1.0);
                     let cycle_on = tone_value(&bind.cycle) > 0.0;
@@ -177,7 +202,7 @@ pub fn schedule(
                             if let Some(Param::Const(d)) = bind.dur {
                                 (d as f64 * sample_rate as f64).round() as u64
                             } else if cycle_on {
-                                max_samples - offset
+                                window_end - offset
                             } else {
                                 let total = data.frames.len() as f64;
                                 let start =
@@ -199,7 +224,7 @@ pub fn schedule(
                         _ => voice_default_duration(voice),
                     };
                     events.push(Event {
-                        sample_offset: offset,
+                        sample_offset,
                         loop_name: loop_stmt.name.clone(),
                         loop_index,
                         voice,
@@ -335,6 +360,93 @@ mod tests {
     ) -> Result<Timeline> {
         let program = parse(&lex(src).unwrap()).unwrap();
         schedule(&program, loop_generations, samples, max_samples, 48000)
+    }
+
+    fn src2timeline_window(
+        src: &str,
+        generation: u64,
+        window_start: u64,
+        window_len: u64,
+    ) -> Timeline {
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let mut loop_generations = HashMap::new();
+        for stmt in &program.statements {
+            if let Stmt::Loop(loop_stmt) = stmt {
+                loop_generations.insert(loop_stmt.name.clone(), generation);
+            }
+        }
+        schedule_window(
+            &program,
+            &loop_generations,
+            &HashMap::new(),
+            window_start,
+            window_len,
+            48000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn window_excludes_events_outside_bounds() {
+        // tempo 120: bar 96000; "x . x ." hits at steps 0, 2 -> offsets 0, 48000 per bar.
+        let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\"\n";
+        let first = src2timeline_window(src, 0, 0, 96000 * 2);
+        let second = src2timeline_window(src, 0, 96000 * 2, 96000 * 2);
+        let first_offsets: Vec<u64> = first.events.iter().map(|e| e.sample_offset).collect();
+        let second_offsets: Vec<u64> = second.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(first_offsets, vec![0, 48000, 96000, 144000]);
+        assert_eq!(
+            second_offsets, first_offsets,
+            "window (2 bars, 4 bars) repeats the same grid with offsets relative to its start"
+        );
+    }
+
+    #[test]
+    fn window_half_open_boundary_hits_once() {
+        // A hit exactly at the window end belongs to the NEXT window.
+        let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\"\n";
+        let first = src2timeline_window(src, 0, 0, 96000);
+        let second = src2timeline_window(src, 0, 96000, 96000);
+        let first_offsets: Vec<u64> = first.events.iter().map(|e| e.sample_offset).collect();
+        let second_offsets: Vec<u64> = second.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(
+            first_offsets,
+            vec![0, 48000],
+            "window (0, 1 bar) must exclude the bar-1 hit at 96000"
+        );
+        assert_eq!(
+            second_offsets,
+            vec![0, 48000],
+            "window (1 bar, 2 bars) includes the bar-1 hit at offset 0"
+        );
+    }
+
+    #[test]
+    fn every_n_phase_is_absolute_across_windows() {
+        // "x . x ." | every(2, rev) reverses absolute bars 1, 3, ... A window
+        // starting at bar 1 must still reverse absolute bars 1 and 3 (leaving
+        // bar 2 alone) — a window-local bar index would flip the wrong bars.
+        let src =
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . x .\" | every(2, rev)\n";
+        let tl = src2timeline_window(src, 0, 96000, 96000 * 3);
+        let offsets: Vec<u64> = tl.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(
+            offsets,
+            vec![24000, 72000, 96000, 144000, 216000, 264000],
+            "absolute bar 1 reversed, bar 2 normal, bar 3 reversed"
+        );
+        let full = src2timeline(src, 0, 96000 * 4);
+        let full_offsets: Vec<u64> = full.events.iter().map(|e| e.sample_offset).collect();
+        assert_eq!(
+            full_offsets,
+            vec![0, 48000, 120000, 168000, 192000, 240000, 312000, 360000]
+        );
+        let shifted: Vec<u64> = tl.events.iter().map(|e| e.sample_offset + 96000).collect();
+        assert_eq!(
+            shifted,
+            full_offsets[2..].to_vec(),
+            "window (1, 4) must equal the full run's bars 1..4 shifted by the window start"
+        );
     }
 
     #[test]
