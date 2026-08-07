@@ -252,15 +252,9 @@ fn handle_item(
     }
 }
 
-fn dispatch_item(
-    item: MidiItem,
-    origin: Option<(u64, Instant)>,
-    period: Duration,
-    now: Instant,
-    send: &mut impl FnMut(&[u8]),
-) {
-    handle_item(item, origin, period, now, send);
-}
+// Placeholder, never observed: period is only consulted for deferred items,
+// which cannot exist before the first Rebase, and the first Rebase replaces it.
+const INITIAL_PERIOD: Duration = Duration::from_millis(500);
 
 struct WriterState {
     origin: Option<(u64, Instant)>,
@@ -272,7 +266,7 @@ impl WriterState {
     fn new() -> Self {
         Self {
             origin: None,
-            period: Duration::from_millis(500),
+            period: INITIAL_PERIOD,
             deferred: Vec::new(),
         }
     }
@@ -325,7 +319,7 @@ fn writer_step(
         due += 1;
     }
     for (_, item) in st.deferred.drain(..due) {
-        dispatch_item(item, st.origin, st.period, now, send);
+        handle_item(item, st.origin, st.period, now, send);
     }
     if let Some((next, _)) = st.deferred.first() {
         sleeper.sleep_until(*next);
