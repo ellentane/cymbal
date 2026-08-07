@@ -40,6 +40,7 @@ const SAMPLE_RATE: u32 = 48000;
 const RENDER_DEFAULT_SECONDS: u64 = 120;
 const WINDOW_LEN: u64 = cymbal_core::render::STREAM_WINDOW_LEN;
 const UNDERRUN_MSG: &str = "segment underrun — waiting for next window";
+const CLAIM_HISTORY_LEN: usize = 64;
 
 #[derive(Debug)]
 enum UiMsg {
@@ -127,13 +128,18 @@ fn handle_reloaded(
     };
 }
 
-fn is_stale(seq: u64, latest_seq: u64) -> bool {
-    seq < latest_seq
+fn is_stale(recent: &[(u64, Vec<String>)], seq: u64) -> bool {
+    // A claim's seq is genuinely stale only when it is older than every
+    // arrival in a full history: the watermark trim evicted its reload entry
+    // (or the seq was never dispatched), so its loops are irrecoverable.
+    // A seq missing from a non-full history can still arrive out of order
+    // (reload seq 6 settling before seq 5) and must pend, not drop.
+    recent.len() == CLAIM_HISTORY_LEN && recent.first().is_some_and(|(oldest, _)| seq < *oldest)
 }
 
 fn record_reload(recent: &mut Vec<(u64, Vec<String>)>, seq: u64, loops: Vec<String>) {
     recent.push((seq, loops));
-    if recent.len() > 64 {
+    if recent.len() > CLAIM_HISTORY_LEN {
         recent.remove(0);
     }
 }
@@ -167,17 +173,21 @@ fn handle_claim(
     loop_index: u32,
     recent: &[(u64, Vec<String>)],
     pending: &mut PendingClaims,
-    latest_seq: u64,
     recording: bool,
 ) -> ClaimAction {
     if !recording {
         return ClaimAction::Ignore;
     }
-    if is_stale(seq, latest_seq) {
-        return ClaimAction::Stale;
-    }
+    // The arrival-order history decides: a claim resolves whenever its seq
+    // is recorded, even if a newer reload has since settled (the double-
+    // reload race: the msg_rx drain can settle seq 6 in the same tick a
+    // TrackClaimed for the recorded seq 3 pops). Only an evicted seq — or
+    // one that can never arrive — drops.
     if let Some(name) = resolve_claim(recent, seq, loop_index) {
         return ClaimAction::Spawn(name);
+    }
+    if is_stale(recent, seq) {
+        return ClaimAction::Stale;
     }
     pending
         .entry(seq)
@@ -1396,6 +1406,15 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     }
                 }
             }
+            // Drain msg_rx before ui_queue: the C4 settle ordering is
+            // load-bearing. A reload settling this tick must run
+            // on_reload_settled (clearing any stored NeedSegment request and
+            // fixing last_window_end) before a same-tick NeedSegment pop
+            // stores/dispatches a request — a swapped drain would let the
+            // segment producer dispatch from the pre-reload program and
+            // queue a swap behind the reload's for the coalescing slot.
+            // (Claims ride the arrival-order history instead: resolve-by-
+            // history is robust to the same-tick settlement race.)
             if let Ok(msg) = msg_rx.try_recv() {
                 match msg {
                     UiMsg::Reloaded {
@@ -1583,7 +1602,6 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         loop_index,
                         &recent,
                         &mut pending,
-                        latest_seq,
                         record_ts.is_some(),
                     ) {
                         ClaimAction::Spawn(name) => {
@@ -2205,7 +2223,7 @@ mod tests {
         let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         assert!(matches!(
-            handle_claim(&rec, 9, 0, &recent, &mut pending, 8, true),
+            handle_claim(&rec, 9, 0, &recent, &mut pending, true),
             ClaimAction::Pend
         ));
         record_reload(&mut recent, 9, vec!["b".to_string()]);
@@ -2677,12 +2695,26 @@ mod tests {
     }
 
     #[test]
-    fn claim_at_current_seq_is_not_stale() {
-        let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string(), "h".to_string()])];
-        let name = resolve_claim(&recent, 2, 1);
+    fn claim_stale_only_after_eviction() {
+        // Staleness is decided by the arrival-order history, not by latest_seq:
+        // a seq older than the newest recorded reload still resolves while its
+        // entry survives (the double-reload race), and a non-full history never
+        // drops — the seq may still arrive out of order.
+        let short: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string(), "h".to_string()])];
+        let name = resolve_claim(&short, 2, 1);
         assert_eq!(name, Some("h".to_string()));
-        assert!(!is_stale(2, 2), "seq == latest_seq is not stale");
-        assert!(is_stale(1, 2), "only older-than-seen swaps are stale");
+        assert!(!is_stale(&short, 1), "a non-full history never evicts");
+        let mut full = Vec::new();
+        for seq in 1..=2 * CLAIM_HISTORY_LEN as u64 {
+            record_reload(&mut full, seq, vec![format!("l{seq}")]);
+        }
+        assert_eq!(full.len(), CLAIM_HISTORY_LEN);
+        assert_eq!(full.first().unwrap().0, CLAIM_HISTORY_LEN as u64 + 1);
+        assert!(is_stale(&full, 1), "evicted by the watermark trim");
+        assert!(
+            !is_stale(&full, CLAIM_HISTORY_LEN as u64 + 1),
+            "oldest surviving arrival"
+        );
     }
 
     #[test]
@@ -2749,19 +2781,45 @@ mod tests {
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         assert!(matches!(
-            handle_claim(&rec, 2, 1, &recent, &mut pending, 2, true),
+            handle_claim(&rec, 2, 1, &recent, &mut pending, true),
             ClaimAction::Spawn(name) if name == "h"
         ));
         assert!(pending.is_empty());
     }
 
     #[test]
-    fn handle_claim_errors_on_stale_seq() {
-        let recent: Vec<(u64, Vec<String>)> = vec![(1, vec!["b".to_string()])];
+    fn handle_claim_resolves_recorded_seq_under_a_newer_reload() {
+        // The double-Ctrl-S race: seq 6 settled in the same tick a
+        // TrackClaimed for the older recorded seq 3 pops. The claim must
+        // resolve Spawn from the arrival-order history — pre-fix the
+        // latest_seq-based Stale check dropped the recorder here.
+        let recent: Vec<(u64, Vec<String>)> =
+            vec![(3, vec!["b".to_string()]), (6, vec!["h".to_string()])];
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         assert!(matches!(
-            handle_claim(&rec, 1, 0, &recent, &mut pending, 2, true),
+            handle_claim(&rec, 3, 0, &recent, &mut pending, true),
+            ClaimAction::Spawn(name) if name == "b"
+        ));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn handle_claim_drops_evicted_seq() {
+        // Arrivals 1..4 were recorded and evicted by the watermark trim:
+        // recent starts at 5, full at the watermark. A claim for seq 1 can
+        // never resolve — its reload info is irrecoverable — so it still
+        // drops with the Stale error instead of pending forever.
+        let mut recent = Vec::new();
+        for seq in 1..=4 + CLAIM_HISTORY_LEN as u64 {
+            record_reload(&mut recent, seq, vec![format!("l{seq}")]);
+        }
+        assert_eq!(recent.len(), CLAIM_HISTORY_LEN);
+        assert_eq!(recent.first().unwrap().0, 5, "seq 1..4 evicted");
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 1, 0, &recent, &mut pending, true),
             ClaimAction::Stale
         ));
         assert!(pending.is_empty());
@@ -2773,7 +2831,7 @@ mod tests {
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         assert!(matches!(
-            handle_claim(&rec, 3, 0, &recent, &mut pending, 2, true),
+            handle_claim(&rec, 3, 0, &recent, &mut pending, true),
             ClaimAction::Pend
         ));
         assert_eq!(pending.get(&3).map(Vec::len), Some(1));
@@ -2786,7 +2844,7 @@ mod tests {
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         assert!(matches!(
-            handle_claim(&rec, 2, 0, &recent, &mut pending, 2, false),
+            handle_claim(&rec, 2, 0, &recent, &mut pending, false),
             ClaimAction::Ignore
         ));
         assert!(pending.is_empty());
@@ -2810,7 +2868,7 @@ mod tests {
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         assert!(matches!(
-            handle_claim(&rec, 3, 0, &recent, &mut pending, 2, true),
+            handle_claim(&rec, 3, 0, &recent, &mut pending, true),
             ClaimAction::Pend
         ));
         let drained = drain_pending(&mut pending, 3);
@@ -2844,7 +2902,7 @@ mod tests {
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
         // claim(seq 5) -> Pend
         assert!(matches!(
-            handle_claim(&rec, 5, 0, &recent, &mut pending, 5, true),
+            handle_claim(&rec, 5, 0, &recent, &mut pending, true),
             ClaimAction::Pend
         ));
         // Reloaded(seq 5) arrives -> recorded in arrival order
