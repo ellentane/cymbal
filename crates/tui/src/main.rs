@@ -267,17 +267,8 @@ fn spawn_track_writer(
     std::thread::spawn(move || record_loop(&rec, &path, &tx, start))
 }
 
-fn loop_names(src: &str) -> Result<Vec<String>, Error> {
-    let tokens = lex(src)?;
-    let program = parse(&tokens)?;
-    Ok(program
-        .statements
-        .iter()
-        .filter_map(|s| match s {
-            cymbal_core::ast::Stmt::Loop(l) => Some(l.name.clone()),
-            _ => None,
-        })
-        .collect())
+fn anchor_window_start(engine_pos: u64, bar_samples: u64) -> u64 {
+    engine_pos.div_ceil(bar_samples) * bar_samples
 }
 
 pub fn build_timeline_with(
@@ -285,6 +276,7 @@ pub fn build_timeline_with(
     sample_rate: u32,
     base_dir: &std::path::Path,
     loop_generations: &HashMap<String, u64>,
+    window_start: u64,
 ) -> Result<Timeline, Error> {
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
@@ -293,7 +285,7 @@ pub fn build_timeline_with(
         &program,
         loop_generations,
         &samples,
-        0,
+        window_start,
         WINDOW_LEN,
         sample_rate,
     )
@@ -495,6 +487,7 @@ fn spares_needed(new_names: &[String], old: &HashMap<String, u64>) -> usize {
     new_names.iter().filter(|n| !old.contains_key(*n)).count() + 8
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_reload(
     src: String,
     base: std::path::PathBuf,
@@ -503,38 +496,54 @@ fn spawn_reload(
     seq: u64,
     msg_tx: mpsc::Sender<UiMsg>,
     queue: Arc<AudioQueue>,
+    ui: Arc<cymbal_audio::ui_queue::UiQueue>,
 ) {
-    std::thread::spawn(move || match loop_names(&src) {
-        Ok(names) => {
-            let gens = next_loop_generations(&latest, &names);
-            match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
-                Ok(tl) => {
-                    let needed = spares_needed(&names, &latest);
-                    let window_end = tl.window_start.saturating_add(tl.window_len);
-                    let _ = msg_tx.send(UiMsg::Reloaded {
-                        generations: gens,
-                        loops: names,
-                        seq,
-                        window_end,
-                        src: src.clone(),
-                    });
-                    if let Some(text) = cymbal_core::docs::help_text_src(&src) {
-                        let _ = msg_tx.send(UiMsg::Help(text));
+    std::thread::spawn(move || match lex(&src) {
+        Ok(tokens) => match parse(&tokens) {
+            Ok(program) => {
+                let names: Vec<String> = program
+                    .statements
+                    .iter()
+                    .filter_map(|s| match s {
+                        cymbal_core::ast::Stmt::Loop(l) => Some(l.name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let gens = next_loop_generations(&latest, &names);
+                let window_start =
+                    anchor_window_start(ui.position(), loop_bar_samples(&program)[0]);
+                match build_timeline_with(&src, SAMPLE_RATE, &base, &gens, window_start) {
+                    Ok(tl) => {
+                        let needed = spares_needed(&names, &latest);
+                        let window_end = tl.window_start.saturating_add(tl.window_len);
+                        let _ = msg_tx.send(UiMsg::Reloaded {
+                            generations: gens,
+                            loops: names,
+                            seq,
+                            window_end,
+                            src: src.clone(),
+                        });
+                        if let Some(text) = cymbal_core::docs::help_text_src(&src) {
+                            let _ = msg_tx.send(UiMsg::Help(text));
+                        }
+                        let spares: Vec<_> = if recording {
+                            (0..needed)
+                                .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let _ = queue.send(Msg::Swap(Arc::new(tl), seq, spares));
                     }
-                    let spares: Vec<_> = if recording {
-                        (0..needed)
-                            .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let _ = queue.send(Msg::Swap(Arc::new(tl), seq, spares));
-                }
-                Err(e) => {
-                    let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
+                    Err(e) => {
+                        let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
+                    }
                 }
             }
-        }
+            Err(e) => {
+                let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
+            }
+        },
         Err(e) => {
             let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
         }
@@ -988,8 +997,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let queue = Arc::new(AudioQueue::new(16));
     let ui_queue = cymbal_audio::ui_queue::UiQueue::new(64);
     let base = file.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let initial =
-        build_timeline_with(&src, SAMPLE_RATE, base, &HashMap::new()).map_err(|e| e.to_string())?;
+    let initial = build_timeline_with(&src, SAMPLE_RATE, base, &HashMap::new(), 0)
+        .map_err(|e| e.to_string())?;
     let initial_window_end = initial.window_start.saturating_add(initial.window_len);
     let mut latest_loops: HashMap<String, u64> = initial.loop_generations.iter().cloned().collect();
     let mut status = Status::new();
@@ -1093,6 +1102,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 seq,
                                 msg_tx.clone(),
                                 queue.clone(),
+                                ui_queue.clone(),
                             );
                             status.clear_error();
                             status.message = "reloading...".into();
@@ -1252,6 +1262,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 seq,
                                 msg_tx.clone(),
                                 queue.clone(),
+                                ui_queue.clone(),
                             );
                         }
                         KeyCode::Char('-') => {
@@ -1276,6 +1287,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 seq,
                                 msg_tx.clone(),
                                 queue.clone(),
+                                ui_queue.clone(),
                             );
                         }
                         KeyCode::Char('j') => {
@@ -1310,6 +1322,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     seq,
                                     msg_tx.clone(),
                                     queue.clone(),
+                                    ui_queue.clone(),
                                 );
                                 status.clear_error();
                                 status.message = "transforming...".into();
@@ -1712,7 +1725,7 @@ mod tests {
     fn build_timeline_from_source() {
         let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x . . x\"\n";
         let tl =
-            build_timeline_with(src, 48000, std::path::Path::new("."), &HashMap::new()).unwrap();
+            build_timeline_with(src, 48000, std::path::Path::new("."), &HashMap::new(), 0).unwrap();
         assert!(!tl.events.is_empty());
         assert!(tl.events.iter().all(|e| e.voice == VoiceKind::Kick));
     }
@@ -1724,6 +1737,7 @@ mod tests {
             48000,
             std::path::Path::new("."),
             &HashMap::new(),
+            0,
         )
         .unwrap_err();
         assert!(err.message.contains("pattern"));
@@ -2009,9 +2023,89 @@ mod tests {
             48000,
             std::path::Path::new("."),
             &gens,
+            0,
         )
         .unwrap();
         assert_eq!(tl.generation, 5);
+    }
+
+    #[test]
+    fn build_timeline_with_anchors_the_window_start() {
+        let tl = build_timeline_with(
+            "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x .\"\n",
+            48000,
+            std::path::Path::new("."),
+            &HashMap::new(),
+            192000,
+        )
+        .unwrap();
+        assert_eq!(tl.window_start, 192000);
+        assert_eq!(tl.window_len, WINDOW_LEN);
+        assert!(
+            tl.events.iter().all(|e| e.sample_offset < WINDOW_LEN),
+            "events stay window-relative"
+        );
+    }
+
+    #[test]
+    fn anchor_window_start_rounds_up_to_bar_grid() {
+        assert_eq!(anchor_window_start(0, 24000), 0, "aligned at zero");
+        assert_eq!(anchor_window_start(48000, 24000), 48000, "aligned");
+        assert_eq!(
+            anchor_window_start(48001, 24000),
+            72000,
+            "off-grid rounds up"
+        );
+        assert_eq!(
+            anchor_window_start(23999, 24000),
+            24000,
+            "one short of a boundary"
+        );
+        assert_eq!(
+            anchor_window_start(24000, 24000),
+            24000,
+            "exactly on a boundary"
+        );
+    }
+
+    #[test]
+    fn spawn_reload_anchors_the_window_to_the_engine_position() {
+        let queue = Arc::new(AudioQueue::new(16));
+        let ui = cymbal_audio::ui_queue::UiQueue::new(64);
+        ui.store_position(200_000);
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        spawn_reload(
+            "tempo 240\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n".into(),
+            std::path::PathBuf::from("."),
+            HashMap::new(),
+            false,
+            1,
+            tx,
+            queue.clone(),
+            ui.clone(),
+        );
+        let msg = rx.recv().unwrap();
+        let UiMsg::Reloaded {
+            window_end, seq, ..
+        } = msg
+        else {
+            panic!("expected Reloaded");
+        };
+        assert_eq!(seq, 1);
+        assert_eq!(
+            window_end,
+            240_000 + WINDOW_LEN,
+            "the reloaded window end is anchored: anchor(200000, 48000) = 240000"
+        );
+        let swap = loop {
+            if let Some(Msg::Swap(tl, seq, _)) = queue.try_recv() {
+                assert_eq!(seq, 1);
+                break tl;
+            }
+        };
+        assert_eq!(swap.window_start, 240_000);
+        assert_eq!(swap.window_len, WINDOW_LEN);
+        assert_eq!(swap.bar_samples, 48000, "240 bpm on the 48k grid");
     }
 
     #[test]

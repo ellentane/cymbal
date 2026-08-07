@@ -259,6 +259,9 @@ impl Engine {
             }
         }
         self.position += frames as u64;
+        if let Some(ui) = &self.ui {
+            ui.store_position(self.position);
+        }
     }
 
     pub fn start_recording(
@@ -380,9 +383,19 @@ impl Engine {
         self.timeline_origin = now;
         self.bar_samples = tl.bar_samples;
         self.window_end_abs = tl.window_start.saturating_add(tl.window_len);
+        // Relative latch: the window end is absolute, but the bar grid
+        // restarts at the apply boundary — count bars from `now`, not from
+        // absolute bar numbers. A window end already in the past saturates
+        // to zero bars and fires at the applying boundary itself.
         self.last_bar_in_window = self
-            .window_end_abs
-            .saturating_div(tl.bar_samples)
+            .bar_count
+            .saturating_add(
+                (self
+                    .window_end_abs
+                    .saturating_sub(now)
+                    .saturating_add(tl.bar_samples - 1))
+                    / tl.bar_samples,
+            )
             .saturating_sub(1);
         self.segment_requested = false;
         self.master.set_bar_samples(tl.bar_samples);
@@ -1835,6 +1848,139 @@ mod tests {
             }
         }
         assert!(segments.is_empty(), "u64::MAX window = no segments");
+    }
+
+    #[test]
+    fn anchored_reload_window_requests_segment_at_anchored_end() {
+        // A reload anchored at the boundary where its swap applies (past the
+        // previous window's end) must fire NeedSegment with the anchored end
+        // in the last bar of the anchored window. The old floor math
+        // (window_end / bar_samples - 1) would wait until the absolute bar
+        // of the window end, and a 0-anchored window would schedule its
+        // events ~300s behind the playhead.
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        let mut first = (*tl(vec![], 0, vec![("b".into(), 0)], 96000)).clone();
+        first.window_start = 0;
+        first.window_len = 96000 * 2;
+        engine.submit_swap(Arc::new(first), 1, vec![]);
+        engine_step(&mut engine, 96000 * 2);
+        // cross the first window's end; the engine now sits in silence past
+        // it, with the next boundary at 288000
+        let quiet = engine_step(&mut engine, 96000);
+        // 240-bpm reload: window [288000, 336000) = two 24000-sample bars,
+        // anchored at the boundary where its swap applies
+        let mut reload = (*tl(
+            vec![
+                ev(0, VoiceKind::Hat, 1, 2400),
+                ev(24000, VoiceKind::Hat, 1, 2400),
+            ],
+            1,
+            vec![("b".into(), 1)],
+            24000,
+        ))
+        .clone();
+        reload.window_start = 288000;
+        reload.window_len = 24000 * 2;
+        engine.submit_swap(Arc::new(reload), 2, vec![]);
+        // the swap applies at the first frame (288000); then four anchored bars
+        let out = engine_step(&mut engine, 24000 * 4);
+        assert!(
+            quiet.iter().all(|s| *s == 0.0),
+            "silence while the engine sits past the first window's end"
+        );
+        assert!(
+            out[..16].iter().any(|s| *s != 0.0),
+            "the first hit rings from the anchor (288000), not from 0"
+        );
+        assert!(
+            out[24000 * 2..24000 * 2 + 16].iter().any(|s| *s != 0.0),
+            "the second hit fires one anchored bar later (312000)"
+        );
+        assert!(
+            out[2400 * 2..24000 * 2].iter().all(|s| *s == 0.0),
+            "nothing between the anchored hits"
+        );
+        let mut segments = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::NeedSegment(end) = ev {
+                segments.push(end);
+            }
+        }
+        assert_eq!(
+            segments,
+            vec![192000, 336000],
+            "the first window requests its end; the anchored reload requests \
+             the anchored end in the anchored window's last bar (bar 4, not \
+             absolute bar 13)"
+        );
+    }
+
+    #[test]
+    fn tempo_change_latch_fires_relative_to_the_anchor() {
+        // 120→240 bpm reload with a two-bar anchored window at small scale:
+        // the latch counts bars from the apply boundary. The old floor math
+        // fires at absolute bar 7 (480000); the relative latch fires in the
+        // window's last bar (336000), long before.
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 96000), 1, vec![]);
+        engine_step(&mut engine, 96000 * 2);
+        // cross the 192000 boundary so the reload applies at 288000
+        engine_step(&mut engine, 96000);
+        let mut reload = (*tl(vec![], 1, vec![("b".into(), 1)], 48000)).clone();
+        reload.window_start = 288000;
+        reload.window_len = 48000 * 2;
+        engine.submit_swap(Arc::new(reload), 2, vec![]);
+        // three anchored bars from the applying boundary: the request fires
+        // at bar 4 (position 336000), the last window bar
+        engine_step(&mut engine, 48000 * 3);
+        let mut segments = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::NeedSegment(end) = ev {
+                segments.push(end);
+            }
+        }
+        assert_eq!(
+            segments,
+            vec![384000],
+            "the request fires in the last bar of the anchored window"
+        );
+    }
+
+    #[test]
+    fn window_entirely_in_the_past_requests_segment_immediately() {
+        // The reload lands after its window already elapsed: the saturating
+        // latch fires NeedSegment at the applying boundary instead of
+        // waiting for a bar count the window never reaches.
+        let ui = UiQueue::new(64);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 96000), 1, vec![]);
+        engine_step(&mut engine, 96000 * 2);
+        // cross the 192000 boundary so the reload applies at 288000, where
+        // its window [192000, 240000) is already entirely in the past
+        engine_step(&mut engine, 96000);
+        let mut reload = (*tl(vec![], 1, vec![("b".into(), 1)], 24000)).clone();
+        reload.window_start = 192000;
+        reload.window_len = 24000 * 2;
+        engine.submit_swap(Arc::new(reload), 2, vec![]);
+        // the applying boundary is the first frame: the saturating latch must
+        // fire NeedSegment right there
+        engine_step(&mut engine, 1);
+        let mut segments = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::NeedSegment(end) = ev {
+                segments.push(end);
+            }
+        }
+        assert_eq!(
+            segments,
+            vec![240000],
+            "a window that already ended requests its end at the applying boundary"
+        );
     }
 
     #[test]
