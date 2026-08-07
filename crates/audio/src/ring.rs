@@ -50,6 +50,10 @@ impl AudioQueue {
         self.retired.push(tl).is_ok()
     }
 
+    pub fn retired_available(&self) -> usize {
+        self.retired.capacity() - self.retired.len()
+    }
+
     pub fn take_retired(&self) -> Vec<Arc<Timeline>> {
         let mut out = Vec::new();
         while let Some(tl) = self.retired.pop() {
@@ -210,5 +214,16 @@ mod tests {
             !q.push_retired(tl(5)),
             "overflowing the retired slot reports failure instead of allocating"
         );
+    }
+
+    #[test]
+    fn retired_available_tracks_free_slots() {
+        let q = AudioQueue::new(4);
+        assert_eq!(q.retired_available(), 4);
+        assert!(q.push_retired(tl(1)));
+        assert_eq!(q.retired_available(), 3);
+        let drained = q.take_retired();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(q.retired_available(), 4, "draining restores the free slots");
     }
 }

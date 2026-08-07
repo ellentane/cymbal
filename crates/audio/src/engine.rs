@@ -115,8 +115,17 @@ impl Engine {
     pub fn take_retired(&self) -> Vec<Arc<Timeline>> {
         self.retired
             .lock()
-            .map(|mut v| std::mem::take(&mut *v))
+            .map(|mut v| v.drain(..).collect())
             .unwrap()
+    }
+
+    pub(crate) fn take_retired_into(&self, n: usize, mut push: impl FnMut(Arc<Timeline>)) -> usize {
+        let mut v = self.retired.lock().unwrap();
+        let n = n.min(v.len());
+        for tl in v.drain(..n) {
+            push(tl);
+        }
+        n
     }
 
     pub fn set_midi(&mut self, midi: Option<Arc<MidiOut>>) {
@@ -491,6 +500,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ring::AudioQueue;
     use cymbal_core::ast::VoiceKind;
     use cymbal_core::scheduler::{Event, Timeline};
     use std::alloc::{GlobalAlloc, Layout, System};
@@ -1606,6 +1616,7 @@ mod tests {
         engine.set_midi(Some(midi.clone()));
         let ui = UiQueue::new(64);
         engine.set_ui(Some(ui.clone()));
+        let retired_q = AudioQueue::new(4);
         engine.submit_swap(tl_a, 1, vec![]);
         engine.process(&mut out);
         let rec = Recorder::new(4, 4);
@@ -1622,6 +1633,9 @@ mod tests {
         engine.start_recording(rec.clone(), tracks, spares);
         engine.submit_swap(tl_b, 2, vec![]);
         engine.process(&mut out);
+        engine.take_retired_into(retired_q.retired_available(), |tl| {
+            let _ = retired_q.push_retired(tl);
+        });
         engine.submit_swap(tl_c, 3, refill);
         engine.process(&mut out);
         assert_eq!(
@@ -1638,6 +1652,25 @@ mod tests {
             Some(2),
             "both counted swaps must have applied"
         );
+        let drained = retired_q.take_retired();
+        assert_eq!(
+            drained.len(),
+            1,
+            "the first retirement was pushed through the bridge drain"
+        );
+        assert_eq!(
+            drained[0].generation, 0,
+            "the drained timeline is the first one"
+        );
+        assert_eq!(
+            engine
+                .take_retired()
+                .iter()
+                .map(|t| t.generation)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "the retirement pushed after the in-window drain is still delivered"
+        );
         let b = rec2.take_filled().unwrap();
         assert!(
             b[..8].iter().any(|s| *s != 0.0),
@@ -1645,8 +1678,9 @@ mod tests {
         );
         assert_eq!(
             count, 0,
-            "swap, spare refill and claim, triggers, clock pulses, bar and \
-             claimed-track events, and recording taps must not allocate"
+            "swap, retirement drain, spare refill and claim, triggers, clock \
+             pulses, bar and claimed-track events, and recording taps must not \
+             allocate"
         );
     }
 
@@ -1974,6 +2008,40 @@ mod tests {
             engine.timeline.as_ref().map(|t| t.generation),
             Some(1),
             "the second timeline stays active"
+        );
+    }
+
+    #[test]
+    fn retired_overflow_stays_in_the_engine() {
+        let mut engine = Engine::new(120.0, 48000);
+        let mut out = vec![0.0f32; 24000 * 2];
+        let timelines: Vec<_> = (0..6).map(|g| tl(vec![], g, vec![], 24000)).collect();
+        for (i, t) in timelines.iter().enumerate() {
+            engine.submit_swap(t.clone(), i as u64 + 1, vec![]);
+            engine.process(&mut out);
+        }
+        let q = AudioQueue::new(4);
+        assert_eq!(q.retired_available(), 4, "empty queue has every slot free");
+        let n = engine.take_retired_into(q.retired_available(), |tl| {
+            assert!(q.push_retired(tl), "the drain stays within the free slots");
+        });
+        assert_eq!(n, 4, "only the free queue slots are drained");
+        assert_eq!(
+            q.take_retired()
+                .iter()
+                .map(|t| t.generation)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "the queue fills in retirement order"
+        );
+        assert_eq!(
+            engine
+                .take_retired()
+                .iter()
+                .map(|t| t.generation)
+                .collect::<Vec<_>>(),
+            vec![4],
+            "the overflow stays in the engine slot, in order"
         );
     }
 }
