@@ -82,24 +82,18 @@ impl Sleeper for RealSleeper {
 #[cfg(target_os = "linux")]
 fn raise_priority() {
     unsafe {
-        let mut param = libc::sched_param { sched_priority: 10 };
+        let param = libc::sched_param { sched_priority: 10 };
         let _ = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
-        let _ = &mut param;
     }
 }
 
 #[cfg(target_os = "macos")]
 fn raise_priority() {
-    // macOS has no SCHED_FIFO; QOS user-interactive is the best-effort
-    // approximation. Not exposed by the libc crate on all versions — best
-    // effort means: try it, ignore failure.
-    #[link(name = "System", kind = "dylib")]
-    extern "C" {
-        fn pthread_set_qos_class_self_np(priority: u32, relative_priority: i32) -> i32;
-    }
-    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    // QOS user-interactive is the best-effort approximation for SCHED_FIFO;
+    // failures (privilege, older macOS) are ignored by design.
     unsafe {
-        let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        let _ =
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
     }
 }
 
