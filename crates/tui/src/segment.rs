@@ -42,6 +42,11 @@ pub struct SegmentScheduler {
     /// Result of the most recent reload: None while in flight, Some(true) on
     /// settled success, Some(false) on settled failure.
     last_reload_result: Option<bool>,
+    /// Set when a bar passes the engine's window end while a segment
+    /// request is outstanding (stored or in flight): the window played out
+    /// and no swap is on its way. Cleared by any successful swap
+    /// (on_segment_done(Some) or a settled reload).
+    underrun: bool,
 }
 
 impl SegmentScheduler {
@@ -54,12 +59,28 @@ impl SegmentScheduler {
             segment_retries: 0,
             last_segment_seq: 0,
             last_reload_result: None,
+            underrun: false,
         }
     }
 
     #[cfg(test)]
     pub fn last_window_end(&self) -> u64 {
         self.last_window_end
+    }
+
+    /// A bar boundary passed. The engine fires NeedSegment at the boundary
+    /// entering the window's last bar, so the first bar after the request is
+    /// registered is the one crossing the window end: if the request is
+    /// still outstanding (stored or in flight) no swap is on its way and the
+    /// engine is playing past its window. Warns once per gap — the warning
+    /// is cleared by the late swap itself, so a later bar must not re-warn.
+    pub fn on_bar(&mut self) -> bool {
+        if !self.underrun && (self.segment_in_flight || self.stored.is_some()) {
+            self.underrun = true;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn is_current(&self, seq: u64) -> bool {
@@ -111,6 +132,7 @@ impl SegmentScheduler {
         match end {
             Some(end) => {
                 self.segment_retries = 0;
+                self.underrun = false;
                 if !superseded {
                     self.last_window_end = end;
                 }
@@ -165,6 +187,7 @@ impl SegmentScheduler {
             Some(end) => {
                 self.last_reload_result = Some(true);
                 self.last_window_end = end;
+                self.underrun = false;
                 self.stored = None;
                 SegmentAction::None
             }
@@ -196,6 +219,34 @@ mod tests {
             SegmentAction::Error(_) => {}
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn segment_underrun_warns_once() {
+        // NeedSegment fired; no segment arrives; a bar passes the window
+        // end with the request still outstanding -> the underrun is
+        // reported once, until the late segment swap clears it.
+        let mut s = SegmentScheduler::new(0);
+        assert!(!s.on_bar(), "nothing outstanding: no underrun");
+        assert_eq!(spawn(s.on_need_segment(300)), (300, 0));
+        s.note_spawn(2);
+        assert!(s.on_bar(), "bar past the window end, segment in flight");
+        assert!(!s.on_bar(), "warns once: the next bar must not re-warn");
+        none(s.on_segment_done(Some(600), 2, false));
+        assert!(!s.on_bar(), "the late segment swap clears the underrun");
+    }
+
+    #[test]
+    fn deferred_request_is_an_underrun_at_the_crossing_bar() {
+        // a request deferred behind a reload is still outstanding: the
+        // window end passes with no segment produced until the reload's
+        // swap applies
+        let mut s = SegmentScheduler::new(0);
+        s.on_reload_started();
+        none(s.on_need_segment(300));
+        assert!(s.on_bar(), "stored (undispatched) request is outstanding");
+        none(s.on_reload_settled(Some(300)));
+        assert!(!s.on_bar(), "the reload's swap ends the gap");
     }
 
     #[test]

@@ -39,7 +39,9 @@ const MAX_SAMPLES: u64 = 3600 * 48000;
 const SAMPLE_RATE: u32 = 48000;
 const RENDER_DEFAULT_SECONDS: u64 = 120;
 const WINDOW_LEN: u64 = cymbal_core::render::STREAM_WINDOW_LEN;
+const UNDERUNN_MSG: &str = "segment underrun — waiting for next window";
 
+#[derive(Debug)]
 enum UiMsg {
     Err(Error, Option<u64>),
     Info(String),
@@ -668,10 +670,18 @@ fn spawn_segment(
                 Ok(None)
             }
         })();
-        let (window_end, loops) = match result {
-            Ok(Some((end, loops))) => (Some(end), loops),
-            _ => (None, Vec::new()),
+        let (window_end, loops, failure) = match result {
+            Ok(Some((end, loops))) => (Some(end), loops, None),
+            Ok(None) => (None, Vec::new(), None),
+            Err(e) => (None, Vec::new(), Some(e)),
         };
+        // A failure is reported with the underlying cause (e.g. the density
+        // cap hint); the engine is never swapped, so it keeps the previous
+        // window — silence after its end — until the scheduler's bounded
+        // retry replaces it or the user restarts the timeline.
+        if let Some(e) = failure {
+            let _ = msg_tx.send(UiMsg::Err(e, None));
+        }
         let _ = msg_tx.send(UiMsg::SegmentDone {
             window_end,
             seq: req.seq,
@@ -1485,6 +1495,11 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             !scheduler.is_current(seq) || reload_seq.load(Ordering::SeqCst) > seq;
                         let action = scheduler.on_segment_done(window_end, seq, superseded);
                         if window_end.is_some() {
+                            // A successful swap is on its way: the underrun
+                            // gap ends at the next bar boundary.
+                            if status.message == UNDERUNN_MSG {
+                                status.message = Status::DEFAULT_MESSAGE.into();
+                            }
                             // Segment swaps can claim recording tracks: the
                             // swap's loops register in the claim history just
                             // like a reload, so pends resolve in arrival order.
@@ -1518,7 +1533,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
             let _ = queue.take_retired();
             while let Some(ev) = ui_queue.try_pop() {
                 match ev {
-                    cymbal_audio::ui_queue::UiEvent::Bar(n) => status.bar = n,
+                    cymbal_audio::ui_queue::UiEvent::Bar(n) => {
+                        status.bar = n;
+                        if scheduler.on_bar() {
+                            status.message = UNDERUNN_MSG.into();
+                        }
+                    }
                     cymbal_audio::ui_queue::UiEvent::MidiDropped(n) => {
                         status.message = format!("MIDI queue overflow — {n} messages dropped");
                     }
@@ -1830,6 +1850,48 @@ mod tests {
         assert_eq!(
             apply_tempo_override(src2, 130.0),
             "tempo 130\nlet kick = kick()\n"
+        );
+    }
+
+    #[test]
+    fn segment_schedule_failure_repeats_previous() {
+        // density cap: the segment thread errors; the failure is reported
+        // with the scheduler's hint and no swap is ever sent — the engine
+        // keeps the previous window, playing silence past its end.
+        let queue = Arc::new(AudioQueue::new(16));
+        let (msg_tx, msg_rx) = mpsc::channel::<UiMsg>();
+        let pattern: String = ["x"; 256].join(" ");
+        let src =
+            format!("tempo 4000\nlet kick = kick()\nloop \"b\":\n    kick << \"{pattern}\"\n");
+        spawn_segment(
+            SegmentRequest {
+                end: 0,
+                src,
+                base: std::path::PathBuf::new(),
+                latest: HashMap::new(),
+                recording: false,
+                seq: 1,
+            },
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(Mutex::new(())),
+            msg_tx,
+            queue.clone(),
+        );
+        match msg_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(UiMsg::Err(e, None)) => {
+                assert!(e.message.contains("dense"), "{}", e.message);
+            }
+            other => panic!("expected Err with the density hint, got {other:?}"),
+        }
+        match msg_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(UiMsg::SegmentDone {
+                window_end: None, ..
+            }) => {}
+            other => panic!("expected a failed SegmentDone, got {other:?}"),
+        }
+        assert!(
+            queue.try_recv().is_none(),
+            "a failed segment must never swap the engine"
         );
     }
 

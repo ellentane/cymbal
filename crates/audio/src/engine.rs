@@ -1610,6 +1610,17 @@ mod tests {
             vec![("b".into(), 2), ("c".into(), 2), ("d".into(), 2)],
             24000,
         );
+        // windowed segment advance: tl_b covers [48000, 96000), tl_c
+        // [96000, 144000) — the engine fires NeedSegment one bar before
+        // each window end, inside the counted region
+        let mut tl_b = (*tl_b).clone();
+        tl_b.window_start = 48000;
+        tl_b.window_len = 48000;
+        let mut tl_c = (*tl_c).clone();
+        tl_c.window_start = 96000;
+        tl_c.window_len = 48000;
+        let tl_b = Arc::new(tl_b);
+        let tl_c = Arc::new(tl_c);
         let mut engine = Engine::new(120.0, 48000);
         let mut out = vec![0.0f32; 48000 * 2];
         let midi = crate::midi_out::MidiOut::new(8192);
@@ -1647,6 +1658,17 @@ mod tests {
         engine.stop_recording();
         let count = ALLOCS.load(Ordering::SeqCst);
         COUNTING.with(|c| c.set(false));
+        let mut segments = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::NeedSegment(end) = ev {
+                segments.push(end);
+            }
+        }
+        assert_eq!(
+            segments,
+            vec![96000, 144000],
+            "one segment request per window, fired in its last bar"
+        );
         assert_eq!(
             engine.timeline.as_ref().map(|t| t.generation),
             Some(2),
@@ -1679,8 +1701,8 @@ mod tests {
         assert_eq!(
             count, 0,
             "swap, retirement drain, spare refill and claim, triggers, clock \
-             pulses, bar and claimed-track events, and recording taps must not \
-             allocate"
+             pulses, bar, claimed-track and segment-request events, and \
+             recording taps must not allocate"
         );
     }
 

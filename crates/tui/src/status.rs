@@ -14,6 +14,8 @@ pub struct Status {
 }
 
 impl Status {
+    pub const DEFAULT_MESSAGE: &str = "Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo";
+
     pub fn new() -> Self {
         Self {
             tempo: 120.0,
@@ -26,7 +28,7 @@ impl Status {
             recording: false,
             record_elapsed_secs: 0,
             error: None,
-            message: "Ctrl-S reload | Ctrl-Q quit | Ctrl-=/- tempo".into(),
+            message: Self::DEFAULT_MESSAGE.into(),
         }
     }
 
