@@ -1156,18 +1156,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                             &msg_tx,
                                         ));
                                     }
-                                    FlushAction::Lost => {
-                                        let _ = msg_tx.send(UiMsg::Err(
-                                            Error::new(
-                                                cymbal_core::error::Span { line: 0, col: 0 },
-                                                cymbal_core::error::ErrorKind::Io,
-                                                format!(
-                                                    "lost mid-recording track claim (seq {seq}): reload failed"
-                                                ),
-                                            ),
-                                            None,
-                                        ));
-                                    }
+                                    FlushAction::Lost => {}
                                     FlushAction::Ignore => {}
                                 }
                             }
@@ -2087,9 +2076,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_claim_reports_lost_when_reload_failed() {
+    fn flush_claim_drops_pend_when_reload_failed() {
         // a claim pended for a reload that errored never resolves: the
-        // reload-error path flushes it and reports it loudly.
+        // reload-error path flushes it and drops the pend, so the reload's
+        // own error is the one the user sees.
         let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string()])];
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
@@ -2103,9 +2093,10 @@ mod tests {
             1,
             "the pended claim is drained when its reload errors"
         );
+        assert!(pending.is_empty(), "the pend is dropped, not left behind");
         assert!(
             matches!(flush_claim(3, 0, &recent, true), FlushAction::Lost),
-            "a reload that never lands loses the claim loudly, not silently"
+            "a reload that never lands cannot spawn a writer"
         );
     }
 
