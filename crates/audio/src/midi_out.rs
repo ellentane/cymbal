@@ -13,23 +13,40 @@ pub trait Sleeper: Send + Sync {
 
 pub struct RealSleeper;
 
+#[cfg(target_os = "linux")]
+fn abs_timespec(remaining: Duration, now_ts: libc::timespec) -> libc::timespec {
+    let rel = libc::timespec {
+        tv_sec: remaining.as_secs() as libc::time_t,
+        tv_nsec: remaining.subsec_nanos() as libc::c_long,
+    };
+    let abs = libc::timespec {
+        tv_sec: now_ts.tv_sec + rel.tv_sec,
+        tv_nsec: now_ts.tv_nsec + rel.tv_nsec,
+    };
+    if abs.tv_nsec >= 1_000_000_000 {
+        libc::timespec {
+            tv_sec: abs.tv_sec + 1,
+            tv_nsec: abs.tv_nsec - 1_000_000_000,
+        }
+    } else {
+        abs
+    }
+}
+
 impl Sleeper for RealSleeper {
     fn now(&self) -> Instant {
         Instant::now()
     }
     fn sleep_until(&self, deadline: Instant) {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
-            // Absolute-time sleep on CLOCK_MONOTONIC (Linux); macOS falls
-            // back through the same path (clock_nanosleep is available).
+            // Absolute-time sleep on CLOCK_MONOTONIC. Linux only: the libc
+            // crate exposes clock_nanosleep/TIMER_ABSTIME on neither macOS
+            // nor the other unix targets, so they take the fallback below.
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return;
             }
-            let mut ts = libc::timespec {
-                tv_sec: remaining.as_secs() as libc::time_t,
-                tv_nsec: remaining.subsec_nanos() as libc::c_long,
-            };
             let mut now_ts = libc::timespec {
                 tv_sec: 0,
                 tv_nsec: 0,
@@ -37,19 +54,7 @@ impl Sleeper for RealSleeper {
             unsafe {
                 libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now_ts);
             }
-            let abs = libc::timespec {
-                tv_sec: now_ts.tv_sec + ts.tv_sec,
-                tv_nsec: now_ts.tv_nsec + ts.tv_nsec,
-            };
-            let abs = if abs.tv_nsec >= 1_000_000_000 {
-                libc::timespec {
-                    tv_sec: abs.tv_sec + 1,
-                    tv_nsec: abs.tv_nsec - 1_000_000_000,
-                }
-            } else {
-                abs
-            };
-            ts = abs;
+            let ts = abs_timespec(remaining, now_ts);
             loop {
                 let r = unsafe {
                     libc::clock_nanosleep(
@@ -63,9 +68,8 @@ impl Sleeper for RealSleeper {
                     break;
                 }
             }
-            let _ = &mut ts;
         }
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         }
@@ -238,35 +242,43 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    #[derive(Clone)]
     #[allow(dead_code)]
     struct FakeSleeper {
-        now: std::cell::RefCell<Instant>,
-        sleeps: std::cell::RefCell<Vec<Instant>>,
+        now: std::sync::Mutex<Instant>,
+        sleeps: std::sync::Mutex<Vec<Instant>>,
+    }
+
+    impl Clone for FakeSleeper {
+        fn clone(&self) -> Self {
+            Self {
+                now: std::sync::Mutex::new(*self.now.lock().unwrap()),
+                sleeps: std::sync::Mutex::new(self.sleeps.lock().unwrap().clone()),
+            }
+        }
     }
 
     impl FakeSleeper {
         #[allow(dead_code)]
         fn new(t0: Instant) -> Self {
             Self {
-                now: std::cell::RefCell::new(t0),
-                sleeps: std::cell::RefCell::new(Vec::new()),
+                now: std::sync::Mutex::new(t0),
+                sleeps: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
 
     impl Sleeper for FakeSleeper {
         fn now(&self) -> Instant {
-            *self.now.borrow()
+            *self.now.lock().unwrap()
         }
         fn sleep_until(&self, deadline: Instant) {
-            self.sleeps.borrow_mut().push(deadline);
-            *self.now.borrow_mut() = deadline;
+            self.sleeps.lock().unwrap().push(deadline);
+            *self.now.lock().unwrap() = deadline;
         }
         fn sleep(&self, dur: Duration) {
-            let n = *self.now.borrow() + dur;
-            self.sleeps.borrow_mut().push(n);
-            *self.now.borrow_mut() = n;
+            let n = *self.now.lock().unwrap() + dur;
+            self.sleeps.lock().unwrap().push(n);
+            *self.now.lock().unwrap() = n;
         }
     }
 
@@ -277,8 +289,36 @@ mod tests {
         assert!(s.now() >= t0);
     }
 
-    // Single-threaded test fake: mutation is confined to one thread.
-    unsafe impl Sync for FakeSleeper {}
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn abs_timespec_carries_nsec_overflow() {
+        let now_ts = libc::timespec {
+            tv_sec: 1000,
+            tv_nsec: 999_999_900,
+        };
+        let abs = abs_timespec(Duration::from_micros(200), now_ts);
+        assert_eq!(abs.tv_sec, 1001);
+        assert_eq!(abs.tv_nsec, 199_900);
+        let no_carry = abs_timespec(Duration::from_nanos(50), now_ts);
+        assert_eq!(no_carry.tv_sec, 1000);
+        assert_eq!(no_carry.tv_nsec, 999_999_950);
+    }
+
+    #[test]
+    fn sleep_until_sleeps_until_deadline() {
+        let s = RealSleeper;
+        let t0 = Instant::now();
+        s.sleep_until(t0 + Duration::from_millis(20));
+        assert!(t0.elapsed() >= Duration::from_millis(15));
+    }
+
+    #[test]
+    fn sleep_until_past_deadline_returns_immediately() {
+        let s = RealSleeper;
+        let t0 = Instant::now();
+        s.sleep_until(t0 - Duration::from_millis(10));
+        assert!(t0.elapsed() < Duration::from_millis(5));
+    }
 
     fn period() -> Duration {
         Duration::from_secs_f64(250.0 / 48000.0)
