@@ -4,8 +4,8 @@ cymbal is a live-coding pattern editor for drum, bass, and lead synthesis. You
 type a small pattern language in a terminal editor and cymbal synthesizes the
 audio in real time, so you can edit a groove while it plays. It ships with five
 synthesizer voices — kick, snare, hat, bass, and lead — a bundled sample kit,
-a deterministic offline renderer, WAV/stem export, MIDI out, and a Web/Wasm
-frontend.
+a deterministic offline renderer, WAV/stem export, a real-time MIDI clock out,
+and a Web/Wasm frontend at parity with the native engine.
 
 ## Quick start
 
@@ -20,9 +20,12 @@ cargo run --release -- --midi examples/beat.cym   # live TUI with MIDI note/cloc
 Open any `.cym` file to start the live editor. Errors are shown inline and
 playback always continues with the last good schedule. `make play` / `make
 export` are shortcuts for the examples above; `render` also accepts a length in
-seconds: `cargo run --release -- render examples/groove.cym groove.wav 30`.
+seconds — any length, streamed in 300-second windows:
+`cargo run --release -- render examples/groove.cym groove.wav 30`.
 `--midi [port]` opens the named MIDI output port (the first available one when
-omitted) and streams note-on/off plus a 24 PPQN clock; `render --tracks`
+omitted) and streams note-on/off plus a 24 PPQN clock from a real-time writer
+thread (send-ahead dispatch; dropped messages show in the status bar);
+`render --tracks`
 writes one dry stem per loop into the output directory alongside the full mix
 in `master.wav`. For a guided walkthrough, open `examples/tutorial.cym`.
 
@@ -97,7 +100,7 @@ loop "beat":
 | Ctrl-S | reload the file — only changed loops rebuild, notes already sounding on unchanged loops keep playing |
 | Ctrl-= / Ctrl-- | raise / lower tempo; forces a full reload of every loop |
 | Alt-R / Alt-H / Alt-[ / Alt-] | reverse / half-speed / rotate the pattern on the cursor line, then reload at the next bar |
-| Ctrl-R | toggle recording — writes `recording-<timestamp>.wav` next to the file, plus `recording-<timestamp>-<loop>.wav` per loop present at record start — names are collision-guarded (`-2`, `-3`, … suffixes); shows `REC mm:ss` in the status bar |
+| Ctrl-R | toggle recording — writes `recording-<timestamp>.wav` next to the file, plus `recording-<timestamp>-<loop>.wav` per loop — loops added mid-recording claim a track as they arrive, with no stem cap — names are collision-guarded (`-2`, `-3`, … suffixes); shows `REC mm:ss` in the status bar |
 | Ctrl-J | toggle MIDI start/stop (0xFA/0xFC) |
 | Ctrl-E | export the current song to `out.wav` next to the file — collision-guarded, so an existing `out.wav` becomes `out-2.wav`, `out-3.wav`, … |
 | Ctrl-Q | quit |
@@ -128,24 +131,35 @@ Four crates in one workspace:
   (compile, offline render, timeline serialization) plus a `no_mangle` engine
   module that runs the core voices inside an AudioWorklet. The demo page lives
   in `crates/wasm/web`; serve that directory after building the crate for
-  `wasm32-unknown-unknown` and running `wasm-bindgen --target web`.
+  `wasm32-unknown-unknown` and running `wasm-bindgen --target web`. Its file
+  input loads a WAV whose filename then works as a `sample "name.wav"` path in
+  the source.
 
 ## Roadmap
 
-The Web/Wasm frontend shipped with v1.2; wasm v1 runs the synth voices without
-the FX sends or sample voices. v1.3 taught the editor an intuitive symbol set
-(`|` transforms, `*` per-hit velocity, `+`/`-` transposes, `..` ramps,
-paren-less pitch/rhythm binds), teaching hints on common mistakes, `let`-name
-resolution (declared names win), an F1 help panel with `help` topics, Tab
-autocomplete, and a guided tutorial. Planned follow-ups: a tighter MIDI clock,
-per-loop recording for loops added mid-recording, and further audio-thread
-allocation discipline for very long timelines.
+The Web/Wasm frontend shipped with v1.2; wasm v1 ran the synth voices without
+the FX sends or sample voices, and v1.4 brought the worklet to parity with the
+native engine. v1.3 taught the editor an intuitive symbol set (`|` transforms,
+`*` per-hit velocity, `+`/`-` transposes, `..` ramps, paren-less pitch/rhythm
+binds), teaching hints on common mistakes, `let`-name resolution (declared
+names win), an F1 help panel with `help` topics, Tab autocomplete, and a
+guided tutorial. v1.4 closed out the engine: a real-time MIDI clock writer
+(absolute-time sleeps, best-effort priority raise, send-ahead dispatch,
+dropped-message reporting), unlimited mid-recording stems (swap-carried
+spares, arrival-order claims), and unbounded session length (schedules and
+offline renders stream forward in 300-second windows; old timelines retire
+off the audio thread). Planned follow-ups: MIDI and recording in the wasm
+worklet (playback-only today), and ALSA-sequencer sample-time scheduling on
+Linux.
 
 ## Platforms
 
-- Linux (PipeWire/ALSA) — primary target
-- macOS (CoreAudio/CoreMIDI) — CI-tested
-- Windows (WASAPI/WinMM) — CI-tested
+- Linux (PipeWire/ALSA) — primary target; the MIDI writer thread raises to
+  SCHED_FIFO (best-effort — unprivileged users fall back silently)
+- macOS (CoreAudio/CoreMIDI) — CI-tested; the MIDI writer thread raises to
+  the QOS user-interactive class, best-effort
+- Windows (WASAPI/WinMM) — CI-tested; the MIDI writer thread raises to
+  THREAD_PRIORITY_HIGHEST, best-effort
 
 Device sample rates other than 48 kHz are supported via resampling on the
 audio thread; recordings are always 48 kHz.
