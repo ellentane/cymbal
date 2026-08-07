@@ -1,11 +1,10 @@
-//! The worklet engine skips `Master` (no delay/reverb in wasm v1) and skips FX
-//! sends: `l.tanh()`/`r.tanh()` only.
-
-//! `semitone` is applied; `bass`/`treble`/`comp`/sample fields are carried on
-//! the wire but not applied yet (D2/D3).
+//! Worklet engine: full native DSP — `Master` (delay/reverb sends) and
+//! per-voice `bass`/`treble`/`comp`. Sample voices land in D3; sample_id is
+//! carried on the wire but not applied yet.
 
 use cymbal_core::ast::VoiceKind;
 use cymbal_core::dsp::{Voice, VoiceParams};
+use cymbal_core::mixer::{Master, VoiceOutput};
 use cymbal_core::scheduler::Timeline;
 
 /// Fixed 64-byte record (LE): offset u64, voice u8, pitch i16 (-1 = none),
@@ -107,6 +106,11 @@ struct Ev {
     velocity: f32,
     duration: u64,
     pan: f32,
+    delay_send: f32,
+    reverb_send: f32,
+    bass: f32,
+    treble: f32,
+    comp: f32,
 }
 
 pub struct Eng {
@@ -116,6 +120,7 @@ pub struct Eng {
     future: Vec<(u64, Ev)>,
     active: Vec<(u64, Ev, Voice)>,
     sample_rate: u32,
+    master: Master,
 }
 
 #[unsafe(no_mangle)]
@@ -127,6 +132,7 @@ pub extern "C" fn eng_alloc(bar_samples: u64, sample_rate: u32) -> *mut Eng {
         future: Vec::new(),
         active: Vec::new(),
         sample_rate,
+        master: Master::new(sample_rate, bar_samples.max(1)),
     }))
 }
 
@@ -159,6 +165,7 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
         return;
     };
     eng.bar_samples = bar_samples;
+    eng.master.set_bar_samples(bar_samples);
     eng.future.clear();
     eng.active.clear();
     for w in events {
@@ -179,6 +186,11 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
                 velocity: w.velocity,
                 duration: w.duration,
                 pan: w.pan,
+                delay_send: w.delay_send,
+                reverb_send: w.reverb_send,
+                bass: w.bass,
+                treble: w.treble,
+                comp: w.comp,
             },
         ));
     }
@@ -210,6 +222,9 @@ pub unsafe extern "C" fn eng_process(e: *mut Eng, out: *mut f32, frames: u32) {
                     ev.kind,
                     VoiceParams {
                         semitone: ev.semitone,
+                        bass: ev.bass,
+                        treble: ev.treble,
+                        comp: ev.comp,
                         ..VoiceParams::default_for(ev.kind, ev.pitch)
                     },
                     eng.sample_rate,
@@ -220,17 +235,22 @@ pub unsafe extern "C" fn eng_process(e: *mut Eng, out: *mut f32, frames: u32) {
             }
         }
         eng.active.retain(|(until, _, _)| *until > now);
-        let mut l = 0.0f32;
-        let mut r = 0.0f32;
+        eng.master.begin_frame();
         for (_, ev, voice) in &mut eng.active {
             if let Some(s) = voice.next_sample(eng.sample_rate) {
-                let angle = (ev.pan + 1.0) * std::f32::consts::PI / 4.0;
-                l += s * ev.velocity * angle.cos();
-                r += s * ev.velocity * angle.sin();
+                eng.master.add_voice(VoiceOutput {
+                    sample: s,
+                    velocity: ev.velocity,
+                    pan: ev.pan,
+                    delay_send: ev.delay_send,
+                    reverb_send: ev.reverb_send,
+                });
             }
         }
-        out[frame * 2] = l.tanh();
-        out[frame * 2 + 1] = r.tanh();
+        let mut frame_out = [0.0f32; 2];
+        eng.master.end_frame(&mut frame_out);
+        out[frame * 2] = frame_out[0];
+        out[frame * 2 + 1] = frame_out[1];
     }
     eng.position += frames as u64;
 }
@@ -280,6 +300,43 @@ mod tests {
             midi: Vec::new(),
             window_start: 0,
             window_len: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn master_bus_matches_native_mix() {
+        use cymbal_core::lexer::lex;
+        use cymbal_core::parser::parse;
+        use cymbal_core::render::render_offline;
+        use cymbal_core::scheduler::schedule;
+        use std::collections::HashMap;
+
+        let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x\" delay=0.8 reverb=0.6 bass=0.4 treble=0.3 comp=0.5 pan=0.2\n";
+        let tl = schedule(
+            &parse(&lex(src).unwrap()).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            48000,
+            48000,
+        )
+        .unwrap();
+        let native = render_offline(src, 48000, 48000, &HashMap::new()).unwrap();
+        let wire = serialize(&tl);
+
+        unsafe {
+            let e = eng_alloc(tl.bar_samples, 48000);
+            eng_submit(e, wire.as_ptr(), wire.len());
+            let mut out = vec![0.0f32; 128 * 2];
+            let mut worklet = Vec::with_capacity(native.len());
+            for _ in 0..48000 / 128 {
+                eng_process(e, out.as_mut_ptr(), 128);
+                worklet.extend_from_slice(&out);
+            }
+            eng_free(e);
+            assert_eq!(
+                worklet, native,
+                "worklet master bus must match the native mix"
+            );
         }
     }
 
