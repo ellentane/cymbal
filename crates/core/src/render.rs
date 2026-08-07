@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::ast::Stmt;
 use crate::dsp::Voice;
 use crate::error::Result;
 use crate::lexer::lex;
 use crate::mixer::{Master, VoiceOutput};
 use crate::parser::parse;
-use crate::scheduler::{SampleData, Timeline, schedule};
+use crate::scheduler::{SampleData, Timeline, schedule, schedule_window};
+
+pub const STREAM_WINDOW_LEN: u64 = 300 * 48000;
+
+const CHUNK_FRAMES: usize = 48000;
 
 pub fn render_offline(
     src: &str,
@@ -18,6 +23,134 @@ pub fn render_offline(
     let program = parse(&tokens)?;
     let timeline = schedule(&program, &HashMap::new(), samples, max_samples, sample_rate)?;
     Ok(render_timeline(&timeline, max_samples, sample_rate))
+}
+
+/// Streams `max_samples` frames of stereo audio in `out` callbacks, rendering
+/// the source window-by-window (STREAM_WINDOW_LEN) with the mixer state and
+/// ringing voices carried across windows, so render length is unbounded.
+pub fn render_offline_streaming(
+    src: &str,
+    max_samples: u64,
+    sample_rate: u32,
+    samples: &HashMap<String, Arc<SampleData>>,
+    out: &mut impl FnMut(&[f32]),
+) -> Result<()> {
+    let tokens = lex(src)?;
+    let program = parse(&tokens)?;
+    render_program_streaming(
+        &program,
+        samples,
+        max_samples,
+        sample_rate,
+        STREAM_WINDOW_LEN,
+        out,
+    )
+}
+
+struct Active {
+    until: u64,
+    voice: Voice,
+    velocity: f32,
+    pan: f32,
+    delay_send: f32,
+    reverb_send: f32,
+    loop_name: String,
+    generation: u64,
+}
+
+fn render_program_streaming(
+    program: &crate::ast::Program,
+    samples: &HashMap<String, Arc<SampleData>>,
+    max_samples: u64,
+    sample_rate: u32,
+    window_len: u64,
+    out: &mut impl FnMut(&[f32]),
+) -> Result<()> {
+    let mut names = Vec::new();
+    for stmt in &program.statements {
+        if let Stmt::Loop(l) = stmt {
+            names.push(l.name.clone());
+        }
+    }
+    // One fixed generation per loop: unchanged across windows, so a voice
+    // ringing across a boundary survives the swap exactly like the single
+    // shot, where generation is uniform and unused by the mixer.
+    let generations: HashMap<String, u64> = names.into_iter().map(|n| (n, 0)).collect();
+    let mut master: Option<Master> = None;
+    let mut active: Vec<Active> = Vec::new();
+    let mut buf: Vec<f32> = Vec::with_capacity(CHUNK_FRAMES * 2);
+    let mut window_start = 0u64;
+    while window_start < max_samples {
+        let len = (max_samples - window_start).min(window_len);
+        let tl = schedule_window(
+            program,
+            &generations,
+            samples,
+            window_start,
+            len,
+            sample_rate,
+        )?;
+        if master.is_none() {
+            master = Some(Master::new(sample_rate, tl.bar_samples));
+        }
+        let master = master.as_mut().unwrap();
+        master.set_bar_samples(tl.bar_samples);
+        active.retain(|a| {
+            tl.loops
+                .iter()
+                .position(|n| *n == a.loop_name)
+                .map(|i| tl.loop_generations[i].1 == a.generation)
+                .unwrap_or(false)
+        });
+        let mut idx = 0usize;
+        let mut frame = 0u64;
+        while frame < len {
+            let chunk = ((len - frame) as usize).min(CHUNK_FRAMES);
+            buf.clear();
+            for i in 0..chunk {
+                let now = window_start + frame + i as u64;
+                master.begin_frame();
+                while idx < tl.events.len() && window_start + tl.events[idx].sample_offset <= now {
+                    let ev = &tl.events[idx];
+                    idx += 1;
+                    active.push(Active {
+                        until: now + ev.duration,
+                        voice: Voice::new(
+                            ev.voice,
+                            crate::dsp::VoiceParams::from_event(ev),
+                            sample_rate,
+                        ),
+                        velocity: ev.velocity,
+                        pan: ev.pan,
+                        delay_send: ev.delay_send,
+                        reverb_send: ev.reverb_send,
+                        loop_name: ev.loop_name.clone(),
+                        generation: ev.generation,
+                    });
+                }
+                active.retain(|a| a.until > now);
+                for a in &mut active {
+                    if let Some(s) = a.voice.next_sample(sample_rate) {
+                        master.add_voice(VoiceOutput {
+                            sample: s,
+                            velocity: a.velocity,
+                            pan: a.pan,
+                            delay_send: a.delay_send,
+                            reverb_send: a.reverb_send,
+                        });
+                    }
+                }
+                let mut frame_out = [0.0f32; 2];
+                master.end_frame(&mut frame_out);
+                buf.push(frame_out[0]);
+                buf.push(frame_out[1]);
+            }
+            out(&buf);
+            frame += chunk as u64;
+        }
+        window_start += len;
+    }
+    Ok(())
 }
 
 fn render_timeline(timeline: &Timeline, max_samples: u64, sample_rate: u32) -> Vec<f32> {
@@ -100,6 +233,27 @@ mod tests {
 
     fn render(src: &str, max_samples: u64) -> Vec<f32> {
         render_offline(src, max_samples, 48000, &HashMap::new()).unwrap()
+    }
+
+    #[test]
+    fn streamed_render_identical_to_single_shot() {
+        // Constant-tempo, non-cycle source (beat.cym). A single-shot 8-bar
+        // render must equal the streamed render split over two 4-bar windows
+        // (Master + ringing voices carried across the boundary).
+        let src = include_str!("../../../examples/beat.cym");
+        let single = render_offline(src, 768000, 48000, &HashMap::new()).unwrap();
+        let program = parse(&lex(src).unwrap()).unwrap();
+        let mut streamed = Vec::new();
+        render_program_streaming(
+            &program,
+            &HashMap::new(),
+            768000,
+            48000,
+            384000,
+            &mut |chunk| streamed.extend_from_slice(chunk),
+        )
+        .unwrap();
+        assert_eq!(single, streamed);
     }
 
     #[test]

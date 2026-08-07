@@ -7,6 +7,7 @@ mod status;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -35,8 +36,7 @@ use status::Status;
 const MAX_SAMPLES: u64 = 3600 * 48000;
 const SAMPLE_RATE: u32 = 48000;
 const RENDER_DEFAULT_SECONDS: u64 = 120;
-const WINDOW_SECS: u64 = 300;
-const WINDOW_LEN: u64 = WINDOW_SECS * SAMPLE_RATE as u64;
+const WINDOW_LEN: u64 = cymbal_core::render::STREAM_WINDOW_LEN;
 
 enum UiMsg {
     Err(Error, Option<u64>),
@@ -52,6 +52,8 @@ enum UiMsg {
     },
     SegmentDone {
         window_end: Option<u64>,
+        seq: u64,
+        loops: Vec<String>,
     },
 }
 
@@ -191,6 +193,39 @@ fn flush_claim(
     }
 }
 
+fn flush_pending_claims(
+    seq: u64,
+    pending: &mut PendingClaims,
+    recent: &[(u64, Vec<String>)],
+    record_ts: Option<&str>,
+    record_dir: Option<&std::path::Path>,
+    msg_tx: &mpsc::Sender<UiMsg>,
+    record_writers: &mut Vec<std::thread::JoinHandle<()>>,
+) {
+    for (loop_index, _, rec) in drain_pending(pending, seq) {
+        match flush_claim(seq, loop_index, recent, record_ts.is_some()) {
+            FlushAction::Spawn(name) => {
+                record_writers.push(spawn_track_writer(
+                    &rec, &name, record_ts, record_dir, msg_tx,
+                ));
+            }
+            FlushAction::Lost => {
+                let _ = msg_tx.send(UiMsg::Err(
+                    Error::new(
+                        cymbal_core::error::Span { line: 0, col: 0 },
+                        cymbal_core::error::ErrorKind::Io,
+                        format!(
+                            "lost mid-recording track claim (seq {seq}): loop missing from reload"
+                        ),
+                    ),
+                    None,
+                ));
+            }
+            FlushAction::Ignore => {}
+        }
+    }
+}
+
 fn join_writers(writers: &mut Vec<std::thread::JoinHandle<()>>, deadline: Instant) {
     for w in writers.drain(..) {
         while !w.is_finished() && Instant::now() < deadline {
@@ -240,19 +275,62 @@ pub fn build_timeline_with(
     let tokens = lex(src)?;
     let program = parse(&tokens)?;
     let samples = samples::load_samples(&program, base_dir)?;
-    cymbal_core::scheduler::schedule(
+    cymbal_core::scheduler::schedule_window(
         &program,
         loop_generations,
         &samples,
-        MAX_SAMPLES,
+        0,
+        WINDOW_LEN,
         sample_rate,
     )
 }
 
-fn render_src(src: &str, base_dir: &std::path::Path, max_samples: u64) -> Result<Vec<f32>, Error> {
+fn render_src_into(
+    src: &str,
+    base_dir: &std::path::Path,
+    max_samples: u64,
+    out: &mut impl FnMut(&[f32]),
+) -> Result<(), Error> {
     let program = parse(&lex(src)?)?;
     let samples = samples::load_samples(&program, base_dir)?;
-    cymbal_core::render::render_offline(src, max_samples, SAMPLE_RATE, &samples)
+    cymbal_core::render::render_offline_streaming(src, max_samples, SAMPLE_RATE, &samples, out)
+}
+
+#[cfg(test)]
+fn render_src(src: &str, base_dir: &std::path::Path, max_samples: u64) -> Result<Vec<f32>, Error> {
+    let mut out = Vec::new();
+    render_src_into(src, base_dir, max_samples, &mut |chunk| {
+        out.extend_from_slice(chunk);
+    })?;
+    Ok(out)
+}
+
+fn export_src_to_wav(
+    src: &str,
+    base_dir: &std::path::Path,
+    out_path: &std::path::Path,
+) -> Result<(), String> {
+    let mut w = cymbal_core::wav::WavWriter::create(out_path, SAMPLE_RATE, 2)
+        .map_err(|e| format!("cannot create {}: {e}", out_path.display()))?;
+    let mut write_err: Option<String> = None;
+    let render = render_src_into(src, base_dir, MAX_SAMPLES, &mut |chunk| {
+        if write_err.is_none()
+            && let Err(e) = w.write_interleaved(chunk)
+        {
+            write_err = Some(e.to_string());
+        }
+    });
+    let result = match (write_err, render) {
+        (Some(e), _) => Err(format!("cannot write {}: {e}", out_path.display())),
+        (None, Err(e)) => Err(format!("render failed: {e}")),
+        (None, Ok(())) => w
+            .finalize()
+            .map_err(|e| format!("cannot finalize {}: {e}", out_path.display())),
+    };
+    if result.is_err() {
+        let _ = std::fs::remove_file(out_path);
+    }
+    result
 }
 
 fn render_to_wav_with(
@@ -265,17 +343,30 @@ fn render_to_wav_with(
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let max_samples = seconds.saturating_mul(SAMPLE_RATE as u64).min(MAX_SAMPLES);
     let base = input.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let samples_out =
-        render_src(&src, base, max_samples).map_err(|e| format!("render failed: {e}"))?;
     if let Some(text) = cymbal_core::docs::help_text_src(&src) {
         eprintln!("{text}");
     }
     let mut w = cymbal_core::wav::WavWriter::create_with_format(output, SAMPLE_RATE, 2, format)
         .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    w.write_interleaved(&samples_out)
-        .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    w.finalize()
-        .map_err(|e| format!("cannot finalize {}: {e}", output.display()))
+    let mut write_err: Option<String> = None;
+    let render = render_src_into(&src, base, max_samples, &mut |chunk| {
+        if write_err.is_none()
+            && let Err(e) = w.write_interleaved(chunk)
+        {
+            write_err = Some(e.to_string());
+        }
+    });
+    let result = match (write_err, render) {
+        (Some(e), _) => Err(format!("cannot write {}: {e}", output.display())),
+        (None, Err(e)) => Err(format!("render failed: {e}")),
+        (None, Ok(())) => w
+            .finalize()
+            .map_err(|e| format!("cannot finalize {}: {e}", output.display())),
+    };
+    if result.is_err() {
+        let _ = std::fs::remove_file(output);
+    }
+    result
 }
 
 fn render_to_wav(
@@ -476,11 +567,12 @@ struct SegmentRequest {
 fn spawn_segment(
     req: SegmentRequest,
     reload_seq: Arc<AtomicU64>,
+    seq_lock: Arc<Mutex<()>>,
     msg_tx: mpsc::Sender<UiMsg>,
     queue: Arc<AudioQueue>,
 ) {
     std::thread::spawn(move || {
-        let result: Result<Option<u64>, Error> = (|| -> Result<Option<u64>, Error> {
+        let result: Result<Option<(u64, Vec<String>)>, Error> = (|| {
             let program = parse(&lex(&req.src)?)?;
             let samples = samples::load_samples(&program, &req.base)?;
             let names: Vec<String> = program
@@ -509,15 +601,32 @@ fn spawn_segment(
             } else {
                 Vec::new()
             };
-            if reload_seq.load(Ordering::SeqCst) <= req.seq {
-                let _ = queue.send(Msg::Swap(Arc::new(tl), req.seq, spares));
-                Ok(Some(window_end))
+            // Check-and-send is atomic with user reload bumps (they take the
+            // same lock), so a stale segment can never replace a reload's swap
+            // in the coalescing slot after the reload was requested. A failed
+            // send is a failure: the caller must retry or the timeline stalls.
+            let sent = {
+                let _guard = seq_lock.lock().unwrap();
+                if reload_seq.load(Ordering::SeqCst) <= req.seq {
+                    queue.send(Msg::Swap(Arc::new(tl), req.seq, spares)).is_ok()
+                } else {
+                    false
+                }
+            };
+            if sent {
+                Ok(Some((window_end, names)))
             } else {
                 Ok(None)
             }
         })();
+        let (window_end, loops) = match result {
+            Ok(Some((end, loops))) => (Some(end), loops),
+            _ => (None, Vec::new()),
+        };
         let _ = msg_tx.send(UiMsg::SegmentDone {
-            window_end: result.ok().flatten(),
+            window_end,
+            seq: req.seq,
+            loops,
         });
     });
 }
@@ -866,8 +975,12 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut record_start: Option<Instant> = None;
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let reload_seq = Arc::new(AtomicU64::new(1));
+    let seq_lock = Arc::new(Mutex::new(()));
     let mut reload_in_flight = false;
     let mut segment_in_flight = false;
+    let mut segment_retries = 0u32;
+    let mut segment_retry_deferred = false;
+    let mut last_segment_seq = 0u64;
     let mut last_window_end = initial_window_end;
     let mut latest_seq: u64 = 0;
     let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
@@ -888,7 +1001,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                             let latest = latest_loops.clone();
                             reload_in_flight = true;
-                            let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                            let seq = {
+                                let _guard = seq_lock.lock().unwrap();
+                                reload_seq.fetch_add(1, Ordering::SeqCst) + 1
+                            };
                             spawn_reload(
                                 src,
                                 base,
@@ -1014,36 +1130,22 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             let base = dir;
                             let tx = msg_tx.clone();
                             std::thread::spawn(move || {
-                                match render_src(&src, &base, MAX_SAMPLES) {
-                                    Ok(samples) => {
-                                        match cymbal_core::wav::write_wav(
-                                            &out_path,
-                                            &samples,
-                                            SAMPLE_RATE,
-                                        ) {
-                                            Ok(()) => {
-                                                let _ = tx.send(UiMsg::Info(format!(
-                                                    "exported {}",
-                                                    out_path.display()
-                                                )));
-                                            }
-                                            Err(e) => {
-                                                let _ = tx.send(UiMsg::Err(
-                                                    Error::new(
-                                                        cymbal_core::error::Span {
-                                                            line: 0,
-                                                            col: 0,
-                                                        },
-                                                        cymbal_core::error::ErrorKind::Io,
-                                                        format!("export failed: {e}"),
-                                                    ),
-                                                    None,
-                                                ));
-                                            }
-                                        }
+                                match export_src_to_wav(&src, &base, &out_path) {
+                                    Ok(()) => {
+                                        let _ = tx.send(UiMsg::Info(format!(
+                                            "exported {}",
+                                            out_path.display()
+                                        )));
                                     }
                                     Err(e) => {
-                                        let _ = tx.send(UiMsg::Err(e, None));
+                                        let _ = tx.send(UiMsg::Err(
+                                            Error::new(
+                                                cymbal_core::error::Span { line: 0, col: 0 },
+                                                cymbal_core::error::ErrorKind::Io,
+                                                e,
+                                            ),
+                                            None,
+                                        ));
                                     }
                                 }
                             });
@@ -1057,7 +1159,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
                             reload_in_flight = true;
-                            let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                            let seq = {
+                                let _guard = seq_lock.lock().unwrap();
+                                reload_seq.fetch_add(1, Ordering::SeqCst) + 1
+                            };
                             spawn_reload(
                                 src,
                                 base,
@@ -1077,7 +1182,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
                             reload_in_flight = true;
-                            let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                            let seq = {
+                                let _guard = seq_lock.lock().unwrap();
+                                reload_seq.fetch_add(1, Ordering::SeqCst) + 1
+                            };
                             spawn_reload(
                                 src,
                                 base,
@@ -1107,7 +1215,10 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                                 let latest = latest_loops.clone();
                                 reload_in_flight = true;
-                                let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                                let seq = {
+                                    let _guard = seq_lock.lock().unwrap();
+                                    reload_seq.fetch_add(1, Ordering::SeqCst) + 1
+                                };
                                 spawn_reload(
                                     editor.content(),
                                     base,
@@ -1199,6 +1310,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         src,
                     } => {
                         reload_in_flight = false;
+                        segment_retry_deferred = false;
                         if seq > latest_seq {
                             last_window_end = window_end;
                             applied_src = src;
@@ -1212,32 +1324,15 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             loops,
                             seq,
                         );
-                        for (loop_index, _, rec) in drain_pending(&mut pending, seq) {
-                            match flush_claim(seq, loop_index, &recent, record_ts.is_some()) {
-                                FlushAction::Spawn(name) => {
-                                    record_writers.push(spawn_track_writer(
-                                        &rec,
-                                        &name,
-                                        record_ts.as_deref(),
-                                        record_dir.as_deref(),
-                                        &msg_tx,
-                                    ));
-                                }
-                                FlushAction::Lost => {
-                                    let _ = msg_tx.send(UiMsg::Err(
-                                        Error::new(
-                                            cymbal_core::error::Span { line: 0, col: 0 },
-                                            cymbal_core::error::ErrorKind::Io,
-                                            format!(
-                                                "lost mid-recording track claim (seq {seq}): loop missing from reload"
-                                            ),
-                                        ),
-                                        None,
-                                    ));
-                                }
-                                FlushAction::Ignore => {}
-                            }
-                        }
+                        flush_pending_claims(
+                            seq,
+                            &mut pending,
+                            &recent,
+                            record_ts.as_deref(),
+                            record_dir.as_deref(),
+                            &msg_tx,
+                            &mut record_writers,
+                        );
                     }
                     UiMsg::RecordError(s) => {
                         recording = false;
@@ -1257,20 +1352,38 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             reload_in_flight = false;
                         }
                         if let Some(seq) = seq {
-                            for (loop_index, _, rec) in drain_pending(&mut pending, seq) {
-                                match flush_claim(seq, loop_index, &recent, record_ts.is_some()) {
-                                    FlushAction::Spawn(name) => {
-                                        record_writers.push(spawn_track_writer(
-                                            &rec,
-                                            &name,
-                                            record_ts.as_deref(),
-                                            record_dir.as_deref(),
-                                            &msg_tx,
-                                        ));
-                                    }
-                                    FlushAction::Lost => {}
-                                    FlushAction::Ignore => {}
-                                }
+                            flush_pending_claims(
+                                seq,
+                                &mut pending,
+                                &recent,
+                                record_ts.as_deref(),
+                                record_dir.as_deref(),
+                                &msg_tx,
+                                &mut record_writers,
+                            );
+                            if segment_retry_deferred && !reload_in_flight {
+                                // The deferred retry fires once the reload that
+                                // preempted it has settled — a failed reload
+                                // leaves the engine windowless (no re-fire).
+                                segment_retry_deferred = false;
+                                segment_in_flight = true;
+                                let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                                last_segment_seq = seq;
+                                spawn_segment(
+                                    SegmentRequest {
+                                        end: last_window_end,
+                                        src: applied_src.clone(),
+                                        base: base.to_path_buf(),
+                                        latest: latest_loops.clone(),
+                                        recording,
+                                        seq,
+                                    },
+                                    reload_seq.clone(),
+                                    seq_lock.clone(),
+                                    msg_tx.clone(),
+                                    queue.clone(),
+                                );
+                                status.message = format!("segment retrying ({segment_retries}/2)");
                             }
                         }
                         status.set_error(e.to_string());
@@ -1279,10 +1392,80 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         help_override = Some(text);
                         help_open = true;
                     }
-                    UiMsg::SegmentDone { window_end } => {
+                    UiMsg::SegmentDone {
+                        window_end,
+                        seq,
+                        loops,
+                    } => {
                         segment_in_flight = false;
-                        if let Some(end) = window_end {
-                            last_window_end = end;
+                        match window_end {
+                            Some(end) => {
+                                segment_retries = 0;
+                                segment_retry_deferred = false;
+                                last_window_end = end;
+                                // Segment swaps can claim recording tracks: the
+                                // swap's loops register in the claim history just
+                                // like a reload, so pends resolve in arrival order.
+                                record_reload(&mut recent, seq, loops);
+                                flush_pending_claims(
+                                    seq,
+                                    &mut pending,
+                                    &recent,
+                                    record_ts.as_deref(),
+                                    record_dir.as_deref(),
+                                    &msg_tx,
+                                    &mut record_writers,
+                                );
+                            }
+                            None => {
+                                // Liveness: the engine fires NeedSegment once per
+                                // window, so a failed or dropped segment would
+                                // stall the timeline forever. last_window_end is
+                                // NOT advanced on failure (a same-end engine
+                                // re-fire still passes the gate), and the window
+                                // is re-requested here directly, bounded. Only the
+                                // most recently spawned segment may retry; an
+                                // older failure is already superseded by a newer
+                                // in-flight request. While a reload is in flight
+                                // the retry is deferred: the reload may replace
+                                // the window (its own NeedSegment will fire), and
+                                // a retry sent behind a reload could win the
+                                // swap slot and play at the wrong origin.
+                                if seq == last_segment_seq && segment_retries < 2 {
+                                    segment_retries += 1;
+                                    if reload_in_flight {
+                                        segment_retry_deferred = true;
+                                    } else {
+                                        segment_retry_deferred = false;
+                                        segment_in_flight = true;
+                                        let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                                        last_segment_seq = seq;
+                                        spawn_segment(
+                                            SegmentRequest {
+                                                end: last_window_end,
+                                                src: applied_src.clone(),
+                                                base: base.to_path_buf(),
+                                                latest: latest_loops.clone(),
+                                                recording,
+                                                seq,
+                                            },
+                                            reload_seq.clone(),
+                                            seq_lock.clone(),
+                                            msg_tx.clone(),
+                                            queue.clone(),
+                                        );
+                                        status.clear_error();
+                                        status.message = format!(
+                                            "segment failed; retrying ({segment_retries}/2)"
+                                        );
+                                    }
+                                } else if seq == last_segment_seq {
+                                    status.set_error(
+                                        "segment production failed repeatedly; press Ctrl-S to restart the timeline"
+                                            .into(),
+                                    );
+                                }
+                            }
                         }
                     }
                     m => apply_ui_msg(&mut status, m),
@@ -1335,7 +1518,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             continue;
                         }
                         segment_in_flight = true;
+                        segment_retries = 0;
                         let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                        last_segment_seq = seq;
                         spawn_segment(
                             SegmentRequest {
                                 end,
@@ -1346,6 +1531,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 seq,
                             },
                             reload_seq.clone(),
+                            seq_lock.clone(),
                             msg_tx.clone(),
                             queue.clone(),
                         );
@@ -1628,6 +1814,115 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tl.generation, 5);
+    }
+
+    #[test]
+    fn segment_swap_lands_with_claim_loops() {
+        // The segment producer must deliver its swap AND register the swap's
+        // loops in the claim history, so mid-recording claims for its seq
+        // resolve like reload claims (precondition: recording claims).
+        let queue = Arc::new(AudioQueue::new(16));
+        let reload_seq = Arc::new(AtomicU64::new(1));
+        let seq_lock = Arc::new(Mutex::new(()));
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        spawn_segment(
+            SegmentRequest {
+                end: 96000,
+                src: "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n".into(),
+                base: std::path::PathBuf::from("."),
+                latest: HashMap::new(),
+                recording: false,
+                seq: 2,
+            },
+            reload_seq,
+            seq_lock,
+            tx,
+            queue.clone(),
+        );
+        let msg = rx.recv().unwrap();
+        let UiMsg::SegmentDone {
+            window_end,
+            seq,
+            loops,
+        } = msg
+        else {
+            panic!("expected SegmentDone");
+        };
+        assert_eq!(seq, 2);
+        // end 96000 + 300s = 14496000; alignment extends to the next 120bpm bar
+        // multiple (the window is half-open): 151*96000 + 96000.
+        assert_eq!(window_end, Some(14592000));
+        assert_eq!(loops, vec!["b".to_string()]);
+        let swap = loop {
+            if let Some(Msg::Swap(tl, seq, _)) = queue.try_recv() {
+                assert_eq!(seq, 2);
+                break tl;
+            }
+        };
+        assert_eq!(swap.window_start, 96000);
+        assert_eq!(swap.window_len, 14592000 - 96000);
+        assert_eq!(swap.loops, vec!["b".to_string()]);
+        assert!(
+            swap.events
+                .iter()
+                .all(|e| e.sample_offset < swap.window_len),
+            "events are window-relative"
+        );
+    }
+
+    #[test]
+    fn segment_send_is_suppressed_after_reload_bump() {
+        // A reload bumped reload_seq past the request's seq before the send:
+        // the swap must not reach the engine (precondition: TOCTOU precedence).
+        let queue = Arc::new(AudioQueue::new(16));
+        let reload_seq = Arc::new(AtomicU64::new(3));
+        let seq_lock = Arc::new(Mutex::new(()));
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        spawn_segment(
+            SegmentRequest {
+                end: 96000,
+                src: "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x\"\n".into(),
+                base: std::path::PathBuf::from("."),
+                latest: HashMap::new(),
+                recording: false,
+                seq: 2,
+            },
+            reload_seq,
+            seq_lock,
+            tx,
+            queue.clone(),
+        );
+        let msg = rx.recv().unwrap();
+        let UiMsg::SegmentDone {
+            window_end, seq, ..
+        } = msg
+        else {
+            panic!("expected SegmentDone");
+        };
+        assert_eq!(seq, 2);
+        assert_eq!(window_end, None, "stale segment must report failure");
+        assert!(queue.try_recv().is_none(), "no swap may reach the engine");
+    }
+
+    #[test]
+    fn segment_claim_pends_then_flushes_from_segment_loops() {
+        // The SegmentDone handler's sequence: a mid-recording claim for a
+        // segment seq pends until SegmentDone registers the segment's loops,
+        // then flushes to Spawn — never Lost (precondition: recording claims).
+        let mut pending: PendingClaims = HashMap::new();
+        let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        assert!(matches!(
+            handle_claim(&rec, 9, 0, &recent, &mut pending, 8, true),
+            ClaimAction::Pend
+        ));
+        record_reload(&mut recent, 9, vec!["b".to_string()]);
+        assert_eq!(drain_pending(&mut pending, 9).len(), 1);
+        assert!(matches!(
+            flush_claim(9, 0, &recent, true),
+            FlushAction::Spawn(name) if name == "b"
+        ));
+        assert!(pending.is_empty());
     }
 
     #[test]
