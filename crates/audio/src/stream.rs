@@ -70,7 +70,7 @@ pub fn start_audio(
     let stream_config: cpal::StreamConfig = config.into();
 
     let mut engine = Engine::new(initial.tempo, Transport::SAMPLE_RATE);
-    engine.submit_swap(initial, 1);
+    engine.submit_swap(initial, 1, vec![]);
     engine.set_midi(midi);
     engine.set_ui(ui_queue);
 
@@ -92,7 +92,7 @@ pub fn start_audio(
             move |data: &mut [f32], _| {
                 while let Some(msg) = queue.try_recv() {
                     match msg {
-                        Msg::Swap(tl, seq) => engine.submit_swap(tl, seq),
+                        Msg::Swap(tl, seq, spares) => engine.submit_swap(tl, seq, spares),
                         Msg::RecordStart {
                             master,
                             tracks,
@@ -253,7 +253,7 @@ mod tests {
             loop_generations: vec![("b".into(), 0)],
             midi: vec![],
         });
-        engine.submit_swap(tl, 1);
+        engine.submit_swap(tl, 1, vec![]);
 
         let mut resampler = Resampler::new(44100);
         let mut scratch = vec![0.0f32; resampler.frames_needed(44100) * 2];

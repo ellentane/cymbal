@@ -7,7 +7,7 @@ use crate::recorder::Recorder;
 
 #[derive(Debug)]
 pub enum Msg {
-    Swap(Arc<Timeline>, u64),
+    Swap(Arc<Timeline>, u64, Vec<Arc<Recorder>>),
     RecordStart {
         master: Arc<Recorder>,
         tracks: Vec<(String, Arc<Recorder>)>,
@@ -68,11 +68,11 @@ mod tests {
     #[test]
     fn sends_and_receives_swap_messages() {
         let q = AudioQueue::new(4);
-        q.send(Msg::Swap(tl(1), 1)).unwrap();
-        q.send(Msg::Swap(tl(2), 2)).unwrap();
+        q.send(Msg::Swap(tl(1), 1, vec![])).unwrap();
+        q.send(Msg::Swap(tl(2), 2, vec![])).unwrap();
         let got = q.try_recv();
         assert!(
-            matches!(got, Some(Msg::Swap(tl, _)) if tl.generation == 2),
+            matches!(got, Some(Msg::Swap(tl, _, _)) if tl.generation == 2),
             "first swap is coalesced away"
         );
         assert!(q.try_recv().is_none());
@@ -89,11 +89,11 @@ mod tests {
     fn fifo_order_preserved() {
         let q = AudioQueue::new(8);
         for i in 0..5 {
-            q.send(Msg::Swap(tl(i), i)).unwrap();
+            q.send(Msg::Swap(tl(i), i, vec![])).unwrap();
         }
         let mut gens = Vec::new();
         while let Some(m) = q.try_recv() {
-            if let Msg::Swap(tl, _) = m {
+            if let Msg::Swap(tl, _, _) = m {
                 gens.push(tl.generation);
             }
         }
@@ -119,13 +119,13 @@ mod tests {
     #[test]
     fn shutdown_is_delivered_in_order() {
         let q = AudioQueue::new(4);
-        q.send(Msg::Swap(tl(1), 1)).unwrap();
+        q.send(Msg::Swap(tl(1), 1, vec![])).unwrap();
         q.send(Msg::Shutdown).unwrap();
-        q.send(Msg::Swap(tl(2), 2)).unwrap();
+        q.send(Msg::Swap(tl(2), 2, vec![])).unwrap();
         let mut order = Vec::new();
         while let Some(m) = q.try_recv() {
             order.push(match m {
-                Msg::Swap(_, _) => "swap",
+                Msg::Swap(..) => "swap",
                 Msg::RecordStart { .. } | Msg::RecordStop => "record",
                 Msg::Shutdown => "shutdown",
             });
@@ -140,12 +140,12 @@ mod tests {
     #[test]
     fn swap_slot_coalesces() {
         let q = AudioQueue::new(16);
-        assert!(q.send(Msg::Swap(tl(1), 1)).is_ok());
-        assert!(q.send(Msg::Swap(tl(2), 2)).is_ok());
-        assert!(q.send(Msg::Swap(tl(3), 3)).is_ok());
+        assert!(q.send(Msg::Swap(tl(1), 1, vec![])).is_ok());
+        assert!(q.send(Msg::Swap(tl(2), 2, vec![])).is_ok());
+        assert!(q.send(Msg::Swap(tl(3), 3, vec![])).is_ok());
         let mut got = Vec::new();
         while let Some(m) = q.try_recv() {
-            if let Msg::Swap(t, _) = m {
+            if let Msg::Swap(t, _, _) = m {
                 got.push(t.generation);
             }
         }
@@ -155,11 +155,11 @@ mod tests {
     #[test]
     fn fifo_drains_before_swap_slot() {
         let q = AudioQueue::new(16);
-        q.send(Msg::Swap(tl(1), 1)).unwrap();
+        q.send(Msg::Swap(tl(1), 1, vec![])).unwrap();
         q.send(Msg::RecordStop).unwrap();
         let first = q.try_recv().unwrap();
         assert!(matches!(first, Msg::RecordStop), "FIFO drains first");
-        assert!(matches!(q.try_recv().unwrap(), Msg::Swap(_, _)));
+        assert!(matches!(q.try_recv().unwrap(), Msg::Swap(_, _, _)));
     }
 
     #[test]

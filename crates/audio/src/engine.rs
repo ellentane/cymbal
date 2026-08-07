@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crossbeam_queue::ArrayQueue;
 use cymbal_core::dsp::Voice;
 use cymbal_core::mixer::{Master, VoiceOutput};
 use cymbal_core::scheduler::Timeline;
@@ -9,6 +8,8 @@ use cymbal_core::transport::Transport;
 use crate::midi_out::{MidiItem, MidiOut};
 use crate::recorder::Recorder;
 use crate::ui_queue::{UiEvent, UiQueue};
+
+const SPARE_WATERMARK: usize = 32;
 
 struct RecState {
     rec: Arc<Recorder>,
@@ -41,12 +42,12 @@ pub struct Engine {
     next_bar_abs: u64,
     timeline_origin: u64,
     last_swap_seq: u64,
-    pending: Option<(Arc<Timeline>, u64)>,
+    pending: Option<(Arc<Timeline>, u64, Vec<Arc<Recorder>>)>,
     timeline: Option<Arc<Timeline>>,
     active: Vec<Active>,
     master: Master,
     rec_state: Option<RecState>,
-    spares: ArrayQueue<Arc<Recorder>>,
+    spares: Vec<Arc<Recorder>>,
     tracks: Vec<Option<TrackState>>,
     track_acc: Vec<Option<(f32, f32)>>,
     generations: Vec<u64>,
@@ -79,7 +80,7 @@ impl Engine {
             active: Vec::with_capacity(512),
             master: Master::new(sample_rate, bar_samples),
             rec_state: None,
-            spares: ArrayQueue::new(8),
+            spares: Vec::with_capacity(512),
             tracks: Vec::with_capacity(512),
             track_acc: Vec::with_capacity(512),
             generations: Vec::with_capacity(512),
@@ -97,8 +98,8 @@ impl Engine {
         }
     }
 
-    pub fn submit_swap(&mut self, timeline: Arc<Timeline>, seq: u64) {
-        self.pending = Some((timeline, seq));
+    pub fn submit_swap(&mut self, timeline: Arc<Timeline>, seq: u64, spares: Vec<Arc<Recorder>>) {
+        self.pending = Some((timeline, seq, spares));
     }
 
     pub fn set_midi(&mut self, midi: Option<Arc<MidiOut>>) {
@@ -234,9 +235,10 @@ impl Engine {
         if self.rec_state.is_some() {
             self.stop_recording();
         }
-        while self.spares.pop().is_some() {}
         for s in spares {
-            let _ = self.spares.push(s);
+            if self.spares.len() < SPARE_WATERMARK {
+                self.spares.push(s);
+            }
         }
         if let Some(m) = &self.midi {
             m.try_send(MidiItem::Sys {
@@ -252,7 +254,7 @@ impl Engine {
         let source = self
             .timeline
             .as_ref()
-            .or(self.pending.as_ref().map(|(tl, _)| tl));
+            .or(self.pending.as_ref().map(|(tl, _, _)| tl));
         let n = source.map_or(0, |t| t.loops.len());
         self.tracks.clear();
         self.tracks.resize(n, None);
@@ -325,13 +327,18 @@ impl Engine {
     }
 
     fn apply_swap_at_boundary(&mut self, now: u64) {
-        let Some((tl, seq)) = self.pending.take() else {
+        let Some((tl, seq, spares)) = self.pending.take() else {
             return;
         };
         if seq <= self.last_swap_seq {
             return;
         }
         self.last_swap_seq = seq;
+        for s in spares {
+            if self.spares.len() < SPARE_WATERMARK {
+                self.spares.push(s);
+            }
+        }
 
         let old_tl = self.timeline.replace(tl.clone());
         self.timeline_origin = now;
@@ -541,6 +548,7 @@ mod tests {
                 96000,
             ),
             1,
+            vec![],
         );
         let out = engine_step(&mut engine, 96000);
         assert!(
@@ -571,6 +579,7 @@ mod tests {
                 96000,
             ),
             1,
+            vec![],
         );
         engine_step(&mut engine, 48000);
         engine.submit_swap(
@@ -581,6 +590,7 @@ mod tests {
                 96000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 96000);
         assert!(
@@ -607,6 +617,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         engine_step(&mut engine, 24000);
         // swap at bar 24000: "b" unchanged (gen 0), new "h" gen 1
@@ -641,6 +652,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 24000);
         assert!(
@@ -664,6 +676,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         engine_step(&mut engine, 24000);
         engine.submit_swap(
@@ -694,6 +707,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 4800);
         let mut reference = Engine::new(120.0, 48000);
@@ -725,6 +739,7 @@ mod tests {
                 24000,
             ),
             3,
+            vec![],
         );
         let expect = engine_step(&mut reference, 4800);
         assert_eq!(
@@ -744,9 +759,10 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(vec![], 1, vec![], 24000), 2);
+        engine.submit_swap(tl(vec![], 1, vec![], 24000), 2, vec![]);
         let out = engine_step(&mut engine, 4800);
         assert!(out[0..16].iter().all(|s| *s == 0.0));
     }
@@ -762,6 +778,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         engine.submit_swap(
             tl(
@@ -771,6 +788,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 24000);
         let mut reference = Engine::new(120.0, 48000);
@@ -782,6 +800,7 @@ mod tests {
                 24000,
             ),
             3,
+            vec![],
         );
         let expect = engine_step(&mut reference, 24000);
         assert_eq!(out, expect);
@@ -790,7 +809,7 @@ mod tests {
     #[test]
     fn empty_timeline_is_silent() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![], 96000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![], 96000), 1, vec![]);
         let mut out = vec![0.5f32; 96000 * 2];
         engine.process(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
@@ -799,7 +818,7 @@ mod tests {
     #[test]
     fn swap_rebases_grid_on_tempo_change() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1, vec![]);
         engine_step(&mut engine, 24000);
         engine.submit_swap(
             tl(
@@ -812,6 +831,7 @@ mod tests {
                 12000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 24000);
         assert!(
@@ -840,6 +860,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let rec = Recorder::new(4, 4);
         engine.start_recording(rec.clone(), vec![], vec![]);
@@ -860,7 +881,7 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         let midi = MidiOut::new(64);
         engine.set_midi(Some(midi.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine.start_recording(Recorder::new(4, 4), vec![], vec![]);
         engine_step(&mut engine, 4);
         assert_eq!(midi.take_sys(), Some(vec![0xFA]), "start on record");
@@ -879,6 +900,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let rec = Recorder::new(4, 4);
         engine.start_recording(rec.clone(), vec![], vec![]);
@@ -904,6 +926,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let rec1 = Recorder::new(4, 4);
         engine.start_recording(rec1.clone(), vec![], vec![]);
@@ -940,6 +963,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let rec1 = Recorder::new(4, 4);
         engine.start_recording(rec1.clone(), vec![], vec![]);
@@ -979,6 +1003,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let rec = Recorder::new(64, 4800);
         engine.start_recording(rec.clone(), vec![], vec![]);
@@ -994,6 +1019,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         engine_step(&mut engine, 24000);
         engine.stop_recording();
@@ -1022,7 +1048,7 @@ mod tests {
     #[test]
     fn large_buffer_spans_multiple_boundaries() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1, vec![]);
         engine_step(&mut engine, 24000);
         engine.submit_swap(
             tl(
@@ -1032,6 +1058,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 72000);
         assert_eq!(out.len(), 72000 * 2, "three bars of stereo");
@@ -1062,7 +1089,7 @@ mod tests {
             vec![("b".into(), 0)],
             24000,
         );
-        engine.submit_swap(kick_tl.clone(), 1);
+        engine.submit_swap(kick_tl.clone(), 1, vec![]);
         engine_step(&mut engine, 24000);
         engine.submit_swap(
             tl(
@@ -1072,10 +1099,11 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let out = engine_step(&mut engine, 48000);
         let mut reference = Engine::new(120.0, 48000);
-        reference.submit_swap(kick_tl, 1);
+        reference.submit_swap(kick_tl, 1, vec![]);
         engine_step(&mut reference, 24000);
         let expect = engine_step(&mut reference, 48000);
         assert_eq!(
@@ -1094,6 +1122,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 48000);
         assert!(
@@ -1156,6 +1185,7 @@ mod tests {
                 24000,
             ),
             1,
+            vec![],
         );
         let master = Recorder::new(4, 4);
         let rec_k = Recorder::new(4, 4);
@@ -1189,7 +1219,7 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         let mut hat = ev(0, VoiceKind::Hat, 0, 2400);
         hat.loop_name = "h".into();
-        engine.submit_swap(tl(vec![hat], 0, vec![("h".into(), 0)], 3), 1);
+        engine.submit_swap(tl(vec![hat], 0, vec![("h".into(), 0)], 3), 1, vec![]);
         let rec_h = Recorder::new(4, 4);
         engine.start_recording(
             Recorder::new(4, 4),
@@ -1198,7 +1228,7 @@ mod tests {
         );
         engine_step(&mut engine, 3);
         // swap drops loop "h"
-        engine.submit_swap(tl(vec![], 1, vec![], 3), 2);
+        engine.submit_swap(tl(vec![], 1, vec![], 3), 2, vec![]);
         engine_step(&mut engine, 4);
         assert!(
             rec_h.is_stopped(),
@@ -1212,7 +1242,7 @@ mod tests {
     #[test]
     fn stop_recording_returns_inflight_blocks_to_pool() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![("h".into(), 0)], 3), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("h".into(), 0)], 3), 1, vec![]);
         let master = Recorder::new(4, 4);
         let rec_h = Recorder::new(4, 4);
         let master_before = master.pool_len();
@@ -1234,7 +1264,7 @@ mod tests {
     #[test]
     fn removed_loop_recorder_returns_empty_inflight_block() {
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![("h".into(), 0)], 3), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("h".into(), 0)], 3), 1, vec![]);
         let rec_h = Recorder::new(4, 4);
         let before = rec_h.pool_len();
         engine.start_recording(
@@ -1242,7 +1272,7 @@ mod tests {
             vec![("h".into(), rec_h.clone())],
             vec![],
         );
-        engine.submit_swap(tl(vec![], 1, vec![], 3), 2);
+        engine.submit_swap(tl(vec![], 1, vec![], 3), 2, vec![]);
         engine_step(&mut engine, 1);
         assert_eq!(
             rec_h.pool_len(),
@@ -1274,7 +1304,7 @@ mod tests {
                 bytes: [0x80, 42, 0],
             },
         ];
-        engine.submit_swap(Arc::new(tl), 1);
+        engine.submit_swap(Arc::new(tl), 1, vec![]);
         engine_step(&mut engine, 4800);
         let a = midi.take_note();
         let b = midi.take_note();
@@ -1289,7 +1319,7 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         let midi = MidiOut::new(8192);
         engine.set_midi(Some(midi.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 24000);
         let mut tl2 = (*tl(
             vec![ev(0, VoiceKind::Hat, 1, 2400)],
@@ -1302,7 +1332,7 @@ mod tests {
             sample_offset: 0,
             bytes: [0x99, 42, 100],
         }];
-        engine.submit_swap(Arc::new(tl2), 2);
+        engine.submit_swap(Arc::new(tl2), 2, vec![]);
         let out = engine_step(&mut engine, 24000);
         assert_eq!(
             midi.take_rebase_offset(),
@@ -1324,7 +1354,7 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         let midi = MidiOut::new(8192);
         engine.set_midi(Some(midi.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 24000);
         assert_eq!(
             midi.take_rebase_offset(),
@@ -1338,7 +1368,7 @@ mod tests {
         // same behavior pin as swap_rebases_grid_on_tempo_change, but exercises
         // the cursor path: events fire from the swapped timeline at origin + offset
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 24000);
         engine.submit_swap(
             tl(
@@ -1351,6 +1381,7 @@ mod tests {
                 12000,
             ),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 24000);
         assert!(out[0..16].iter().any(|s| *s != 0.0), "kick at origin + 0");
@@ -1370,9 +1401,10 @@ mod tests {
         engine.submit_swap(
             tl(vec![hat], 0, vec![("b".into(), 0), ("h".into(), 0)], 2000),
             1,
+            vec![],
         );
         engine_step(&mut engine, 2000);
-        engine.submit_swap(tl(vec![], 1, vec![("h".into(), 0)], 2000), 2);
+        engine.submit_swap(tl(vec![], 1, vec![("h".into(), 0)], 2000), 2, vec![]);
         let out = engine_step(&mut engine, 2000);
         assert!(
             out[0..16].iter().any(|s| *s != 0.0),
@@ -1414,11 +1446,13 @@ mod tests {
                 2000,
             ),
             1,
+            vec![],
         );
         engine_step(&mut engine, 2000);
         engine.submit_swap(
             tl(vec![], 0, vec![("c".into(), 0), ("a".into(), 0)], 2000),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 2000);
         assert!(
@@ -1441,11 +1475,13 @@ mod tests {
                 2000,
             ),
             1,
+            vec![],
         );
         engine_step(&mut engine, 2000);
         engine.submit_swap(
             tl(vec![], 1, vec![("c".into(), 0), ("a".into(), 1)], 2000),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 4800);
         assert!(
@@ -1465,6 +1501,7 @@ mod tests {
         engine.submit_swap(
             tl(vec![bass], 0, vec![("a".into(), 0), ("b".into(), 0)], 2000),
             1,
+            vec![],
         );
         engine_step(&mut engine, 2000);
         let rec_a = Recorder::new(4, 2000);
@@ -1478,6 +1515,7 @@ mod tests {
         engine.submit_swap(
             tl(vec![], 1, vec![("b".into(), 0), ("a".into(), 0)], 2000),
             2,
+            vec![],
         );
         let out = engine_step(&mut engine, 2000);
         assert!(
@@ -1523,7 +1561,7 @@ mod tests {
         engine.set_midi(Some(midi.clone()));
         let ui = UiQueue::new(64);
         engine.set_ui(Some(ui.clone()));
-        engine.submit_swap(tl_a, 1);
+        engine.submit_swap(tl_a, 1, vec![]);
         engine.process(&mut out);
         let rec = Recorder::new(4, 4);
         let rec2 = Recorder::new(4, 4);
@@ -1534,7 +1572,7 @@ mod tests {
         COUNTING.with(|c| c.set(true));
         ALLOCS.store(0, Ordering::SeqCst);
         engine.start_recording(rec.clone(), tracks, spares);
-        engine.submit_swap(tl_b, 2);
+        engine.submit_swap(tl_b, 2, vec![]);
         engine.process(&mut out);
         engine.stop_recording();
         let count = ALLOCS.load(Ordering::SeqCst);
@@ -1595,7 +1633,7 @@ mod tests {
             midi: vec![],
         });
         let mut engine = Engine::new(120.0, 48000);
-        engine.submit_swap(tl, 1);
+        engine.submit_swap(tl, 1, vec![]);
         let mut out = vec![0.0f32; 100 * 2];
         engine.process(&mut out);
         assert_eq!(
@@ -1610,7 +1648,7 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         let midi = crate::midi_out::MidiOut::new(8192);
         engine.set_midi(Some(midi.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 2500);
         let mut pulses = Vec::new();
         while let Some(item) = midi.take_clock() {
@@ -1630,9 +1668,9 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         let midi = crate::midi_out::MidiOut::new(8192);
         engine.set_midi(Some(midi.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 24000);
-        engine.submit_swap(tl(vec![], 1, vec![("b".into(), 1)], 12000), 2);
+        engine.submit_swap(tl(vec![], 1, vec![("b".into(), 1)], 12000), 2, vec![]);
         engine_step(&mut engine, 12000);
         let mut pulses = Vec::new();
         while let Some(p) = midi.take_clock() {
@@ -1648,7 +1686,7 @@ mod tests {
         let ui = UiQueue::new(64);
         let mut engine = Engine::new(120.0, 48000);
         engine.set_ui(Some(ui.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 72000);
         let mut bars = Vec::new();
         while let Some(ev) = ui.try_pop() {
@@ -1665,9 +1703,9 @@ mod tests {
         let ui = UiQueue::new(64);
         let mut engine = Engine::new(120.0, 48000);
         engine.set_ui(Some(ui.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 12000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 12000), 1, vec![]);
         engine_step(&mut engine, 12000);
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 2);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 2, vec![]);
         engine_step(&mut engine, 72000);
         let mut bars = Vec::new();
         while let Some(ev) = ui.try_pop() {
@@ -1690,7 +1728,7 @@ mod tests {
         let mut engine = Engine::new(120.0, 48000);
         engine.set_midi(Some(midi.clone()));
         engine.set_ui(Some(ui.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine_step(&mut engine, 24001);
         let mut dropped = Vec::new();
         while let Some(ev) = ui.try_pop() {
@@ -1711,7 +1749,7 @@ mod tests {
         let ui = UiQueue::new(64);
         let mut engine = Engine::new(120.0, 48000);
         engine.set_ui(Some(ui.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         let spares = vec![Recorder::new(4, 4)];
         engine.start_recording(Recorder::new(4, 4), vec![], spares);
         engine_step(&mut engine, 24000);
@@ -1724,6 +1762,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         engine_step(&mut engine, 24000);
         let claim = loop {
@@ -1753,7 +1792,7 @@ mod tests {
         let ui = UiQueue::new(64);
         let mut engine = Engine::new(120.0, 48000);
         engine.set_ui(Some(ui.clone()));
-        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1, vec![]);
         engine.start_recording(Recorder::new(4, 4), vec![], vec![]); // no spares
         engine_step(&mut engine, 24000);
         engine.submit_swap(
@@ -1764,6 +1803,7 @@ mod tests {
                 24000,
             ),
             2,
+            vec![],
         );
         engine_step(&mut engine, 24000);
         let mut claims = 0;
@@ -1773,5 +1813,39 @@ mod tests {
             }
         }
         assert_eq!(claims, 0, "no spares -> no claims");
+    }
+
+    #[test]
+    fn swap_refills_spares_beyond_old_cap() {
+        use crate::ui_queue::{UiEvent, UiQueue};
+        let ui = UiQueue::new(128);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![], 24000), 1, vec![]);
+        engine_step(&mut engine, 24000);
+        engine.start_recording(Recorder::new(4, 4), vec![], vec![]);
+        // swap adds 20 new loops, carrying 20 spares
+        let first: Vec<(String, u64)> = (0..20).map(|i| (format!("l{i}"), 1)).collect();
+        let spares: Vec<_> = (0..20).map(|_| Recorder::new(4, 4)).collect();
+        engine.submit_swap(tl(vec![], 1, first.clone(), 24000), 2, spares);
+        engine_step(&mut engine, 24000);
+        // next swap adds 5 more loops, carrying 5 spares
+        let mut second = first;
+        second.extend((20..25).map(|i| (format!("l{i}"), 1)));
+        let spares: Vec<_> = (0..5).map(|_| Recorder::new(4, 4)).collect();
+        engine.submit_swap(tl(vec![], 2, second, 24000), 3, spares);
+        engine_step(&mut engine, 24000);
+        let mut claimed: Vec<u32> = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::TrackClaimed { loop_index, .. } = ev {
+                claimed.push(loop_index);
+            }
+        }
+        claimed.sort_unstable();
+        assert_eq!(
+            claimed,
+            (0..25).collect::<Vec<u32>>(),
+            "every new loop claims a track, beyond the old 8-spare cap"
+        );
     }
 }

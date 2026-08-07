@@ -389,6 +389,7 @@ fn spawn_reload(
             let gens = next_loop_generations(&latest, &names);
             match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                 Ok(tl) => {
+                    let needed = names.len().saturating_sub(latest.len()) + 8;
                     let _ = msg_tx.send(UiMsg::Reloaded {
                         generations: gens,
                         loops: names,
@@ -397,7 +398,10 @@ fn spawn_reload(
                     if let Some(text) = cymbal_core::docs::help_text_src(&src) {
                         let _ = msg_tx.send(UiMsg::Help(text));
                     }
-                    let _ = queue.send(Msg::Swap(Arc::new(tl), seq));
+                    let spares: Vec<_> = (0..needed)
+                        .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
+                        .collect();
+                    let _ = queue.send(Msg::Swap(Arc::new(tl), seq, spares));
                 }
                 Err(e) => {
                     let _ = msg_tx.send(UiMsg::Err(e));
