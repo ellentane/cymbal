@@ -2,6 +2,7 @@ mod editor;
 mod help_panel;
 mod highlight;
 mod samples;
+mod segment;
 mod status;
 
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ use cymbal_core::scheduler::Timeline;
 
 use editor::Editor;
 use highlight::highlight_line;
+use segment::{SegmentAction, SegmentScheduler};
 use status::Status;
 
 const MAX_SAMPLES: u64 = 3600 * 48000;
@@ -564,6 +566,53 @@ struct SegmentRequest {
     seq: u64,
 }
 
+struct SegmentSpawner<'a> {
+    base: &'a std::path::Path,
+    reload_seq: &'a Arc<AtomicU64>,
+    seq_lock: &'a Arc<Mutex<()>>,
+    msg_tx: &'a mpsc::Sender<UiMsg>,
+    queue: &'a Arc<AudioQueue>,
+}
+
+impl SegmentSpawner<'_> {
+    fn dispatch(
+        &self,
+        scheduler: &mut SegmentScheduler,
+        action: SegmentAction,
+        applied_src: &str,
+        latest: &HashMap<String, u64>,
+        recording: bool,
+        status: &mut Status,
+    ) {
+        let SegmentAction::Spawn { end, retries } = action else {
+            return;
+        };
+        let seq = {
+            let _guard = self.seq_lock.lock().unwrap();
+            self.reload_seq.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        scheduler.note_spawn(seq);
+        spawn_segment(
+            SegmentRequest {
+                end,
+                src: applied_src.to_string(),
+                base: self.base.to_path_buf(),
+                latest: latest.clone(),
+                recording,
+                seq,
+            },
+            self.reload_seq.clone(),
+            self.seq_lock.clone(),
+            self.msg_tx.clone(),
+            self.queue.clone(),
+        );
+        if retries > 0 {
+            status.clear_error();
+            status.message = format!("segment failed; retrying ({retries}/2)");
+        }
+    }
+}
+
 fn spawn_segment(
     req: SegmentRequest,
     reload_seq: Arc<AtomicU64>,
@@ -976,12 +1025,14 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
     let mut record_writers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let reload_seq = Arc::new(AtomicU64::new(1));
     let seq_lock = Arc::new(Mutex::new(()));
-    let mut reload_in_flight = false;
-    let mut segment_in_flight = false;
-    let mut segment_retries = 0u32;
-    let mut segment_retry_deferred = false;
-    let mut last_segment_seq = 0u64;
-    let mut last_window_end = initial_window_end;
+    let mut scheduler = SegmentScheduler::new(initial_window_end);
+    let segment_spawner = SegmentSpawner {
+        base,
+        reload_seq: &reload_seq,
+        seq_lock: &seq_lock,
+        msg_tx: &msg_tx,
+        queue: &queue,
+    };
     let mut latest_seq: u64 = 0;
     let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
     let mut pending: PendingClaims = HashMap::new();
@@ -1000,7 +1051,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             let src = editor.content();
                             let base = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                             let latest = latest_loops.clone();
-                            reload_in_flight = true;
+                            scheduler.on_reload_started();
                             let seq = {
                                 let _guard = seq_lock.lock().unwrap();
                                 reload_seq.fetch_add(1, Ordering::SeqCst) + 1
@@ -1158,7 +1209,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
-                            reload_in_flight = true;
+                            scheduler.on_reload_started();
                             let seq = {
                                 let _guard = seq_lock.lock().unwrap();
                                 reload_seq.fetch_add(1, Ordering::SeqCst) + 1
@@ -1181,7 +1232,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v + 1))
                                 .collect();
-                            reload_in_flight = true;
+                            scheduler.on_reload_started();
                             let seq = {
                                 let _guard = seq_lock.lock().unwrap();
                                 reload_seq.fetch_add(1, Ordering::SeqCst) + 1
@@ -1214,7 +1265,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 let base =
                                     file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                                 let latest = latest_loops.clone();
-                                reload_in_flight = true;
+                                scheduler.on_reload_started();
                                 let seq = {
                                     let _guard = seq_lock.lock().unwrap();
                                     reload_seq.fetch_add(1, Ordering::SeqCst) + 1
@@ -1309,10 +1360,13 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         window_end,
                         src,
                     } => {
-                        reload_in_flight = false;
-                        segment_retry_deferred = false;
-                        if seq > latest_seq {
-                            last_window_end = window_end;
+                        let accepted = seq > latest_seq;
+                        let action = scheduler.on_reload_settled(if accepted {
+                            Some(window_end)
+                        } else {
+                            None
+                        });
+                        if accepted {
                             applied_src = src;
                         }
                         handle_reloaded(
@@ -1333,6 +1387,18 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             &msg_tx,
                             &mut record_writers,
                         );
+                        match action {
+                            SegmentAction::Spawn { .. } => segment_spawner.dispatch(
+                                &mut scheduler,
+                                action,
+                                &applied_src,
+                                &latest_loops,
+                                recording,
+                                &mut status,
+                            ),
+                            SegmentAction::Error(msg) => status.set_error(msg),
+                            SegmentAction::None => {}
+                        }
                     }
                     UiMsg::RecordError(s) => {
                         recording = false;
@@ -1348,10 +1414,8 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         status.recording = false;
                     }
                     UiMsg::Err(e, seq) => {
-                        if seq.is_some() {
-                            reload_in_flight = false;
-                        }
                         if let Some(seq) = seq {
+                            let action = scheduler.on_reload_settled(None);
                             flush_pending_claims(
                                 seq,
                                 &mut pending,
@@ -1361,29 +1425,17 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 &msg_tx,
                                 &mut record_writers,
                             );
-                            if segment_retry_deferred && !reload_in_flight {
-                                // The deferred retry fires once the reload that
-                                // preempted it has settled — a failed reload
-                                // leaves the engine windowless (no re-fire).
-                                segment_retry_deferred = false;
-                                segment_in_flight = true;
-                                let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
-                                last_segment_seq = seq;
-                                spawn_segment(
-                                    SegmentRequest {
-                                        end: last_window_end,
-                                        src: applied_src.clone(),
-                                        base: base.to_path_buf(),
-                                        latest: latest_loops.clone(),
-                                        recording,
-                                        seq,
-                                    },
-                                    reload_seq.clone(),
-                                    seq_lock.clone(),
-                                    msg_tx.clone(),
-                                    queue.clone(),
-                                );
-                                status.message = format!("segment retrying ({segment_retries}/2)");
+                            match action {
+                                SegmentAction::Spawn { .. } => segment_spawner.dispatch(
+                                    &mut scheduler,
+                                    action,
+                                    &applied_src,
+                                    &latest_loops,
+                                    recording,
+                                    &mut status,
+                                ),
+                                SegmentAction::Error(msg) => status.set_error(msg),
+                                SegmentAction::None => {}
                             }
                         }
                         status.set_error(e.to_string());
@@ -1397,75 +1449,39 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         seq,
                         loops,
                     } => {
-                        segment_in_flight = false;
-                        match window_end {
-                            Some(end) => {
-                                segment_retries = 0;
-                                segment_retry_deferred = false;
-                                last_window_end = end;
-                                // Segment swaps can claim recording tracks: the
-                                // swap's loops register in the claim history just
-                                // like a reload, so pends resolve in arrival order.
-                                record_reload(&mut recent, seq, loops);
-                                flush_pending_claims(
-                                    seq,
-                                    &mut pending,
-                                    &recent,
-                                    record_ts.as_deref(),
-                                    record_dir.as_deref(),
-                                    &msg_tx,
-                                    &mut record_writers,
-                                );
-                            }
-                            None => {
-                                // Liveness: the engine fires NeedSegment once per
-                                // window, so a failed or dropped segment would
-                                // stall the timeline forever. last_window_end is
-                                // NOT advanced on failure (a same-end engine
-                                // re-fire still passes the gate), and the window
-                                // is re-requested here directly, bounded. Only the
-                                // most recently spawned segment may retry; an
-                                // older failure is already superseded by a newer
-                                // in-flight request. While a reload is in flight
-                                // the retry is deferred: the reload may replace
-                                // the window (its own NeedSegment will fire), and
-                                // a retry sent behind a reload could win the
-                                // swap slot and play at the wrong origin.
-                                if seq == last_segment_seq && segment_retries < 2 {
-                                    segment_retries += 1;
-                                    if reload_in_flight {
-                                        segment_retry_deferred = true;
-                                    } else {
-                                        segment_retry_deferred = false;
-                                        segment_in_flight = true;
-                                        let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
-                                        last_segment_seq = seq;
-                                        spawn_segment(
-                                            SegmentRequest {
-                                                end: last_window_end,
-                                                src: applied_src.clone(),
-                                                base: base.to_path_buf(),
-                                                latest: latest_loops.clone(),
-                                                recording,
-                                                seq,
-                                            },
-                                            reload_seq.clone(),
-                                            seq_lock.clone(),
-                                            msg_tx.clone(),
-                                            queue.clone(),
-                                        );
-                                        status.clear_error();
-                                        status.message = format!(
-                                            "segment failed; retrying ({segment_retries}/2)"
-                                        );
-                                    }
-                                } else if seq == last_segment_seq {
-                                    status.set_error(
-                                        "segment production failed repeatedly; press Ctrl-S to restart the timeline"
-                                            .into(),
-                                    );
-                                }
-                            }
+                        // Superseded: a newer reload was dispatched after this
+                        // segment started, so its swap may never be applied —
+                        // its end must not advance last_window_end. The
+                        // engine's own NeedSegment carries the truth.
+                        let superseded =
+                            !scheduler.is_current(seq) || reload_seq.load(Ordering::SeqCst) > seq;
+                        let action = scheduler.on_segment_done(window_end, seq, superseded);
+                        if window_end.is_some() {
+                            // Segment swaps can claim recording tracks: the
+                            // swap's loops register in the claim history just
+                            // like a reload, so pends resolve in arrival order.
+                            record_reload(&mut recent, seq, loops);
+                            flush_pending_claims(
+                                seq,
+                                &mut pending,
+                                &recent,
+                                record_ts.as_deref(),
+                                record_dir.as_deref(),
+                                &msg_tx,
+                                &mut record_writers,
+                            );
+                        }
+                        match action {
+                            SegmentAction::Spawn { .. } => segment_spawner.dispatch(
+                                &mut scheduler,
+                                action,
+                                &applied_src,
+                                &latest_loops,
+                                recording,
+                                &mut status,
+                            ),
+                            SegmentAction::Error(msg) => status.set_error(msg),
+                            SegmentAction::None => {}
                         }
                     }
                     m => apply_ui_msg(&mut status, m),
@@ -1514,27 +1530,23 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         ClaimAction::Ignore => {}
                     },
                     cymbal_audio::ui_queue::UiEvent::NeedSegment(end) => {
-                        if end != last_window_end || segment_in_flight || reload_in_flight {
-                            continue;
-                        }
-                        segment_in_flight = true;
-                        segment_retries = 0;
-                        let seq = reload_seq.fetch_add(1, Ordering::SeqCst) + 1;
-                        last_segment_seq = seq;
-                        spawn_segment(
-                            SegmentRequest {
-                                end,
-                                src: applied_src.clone(),
-                                base: base.to_path_buf(),
-                                latest: latest_loops.clone(),
+                        // Authoritative (the engine fires once per applied swap
+                        // with its real window end): defer, never drop. A stale
+                        // request is either overwritten by a newer one or its
+                        // swap is rejected by the sender's seq guard.
+                        let action = scheduler.on_need_segment(end);
+                        match action {
+                            SegmentAction::Spawn { .. } => segment_spawner.dispatch(
+                                &mut scheduler,
+                                action,
+                                &applied_src,
+                                &latest_loops,
                                 recording,
-                                seq,
-                            },
-                            reload_seq.clone(),
-                            seq_lock.clone(),
-                            msg_tx.clone(),
-                            queue.clone(),
-                        );
+                                &mut status,
+                            ),
+                            SegmentAction::Error(msg) => status.set_error(msg),
+                            SegmentAction::None => {}
+                        }
                     }
                 }
             }
