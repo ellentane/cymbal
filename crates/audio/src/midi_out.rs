@@ -79,6 +79,43 @@ impl Sleeper for RealSleeper {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn raise_priority() {
+    unsafe {
+        let mut param = libc::sched_param { sched_priority: 10 };
+        let _ = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+        let _ = &mut param;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn raise_priority() {
+    // macOS has no SCHED_FIFO; QOS user-interactive is the best-effort
+    // approximation. Not exposed by the libc crate on all versions — best
+    // effort means: try it, ignore failure.
+    #[link(name = "System", kind = "dylib")]
+    extern "C" {
+        fn pthread_set_qos_class_self_np(priority: u32, relative_priority: i32) -> i32;
+    }
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    unsafe {
+        let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn raise_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    };
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn raise_priority() {}
+
 pub enum MidiItem {
     Note { offset: u64, bytes: [u8; 3] },
     Rebase { offset: u64, tempo: f64 },
@@ -160,6 +197,7 @@ impl MidiOut {
         let tx = self.clone();
         let port_name = port_name.to_string();
         std::thread::spawn(move || {
+            raise_priority();
             use midir::MidiOutput;
             let Ok(midi_out) = MidiOutput::new("cymbal") else {
                 return;
@@ -280,6 +318,12 @@ mod tests {
             self.sleeps.lock().unwrap().push(n);
             *self.now.lock().unwrap() = n;
         }
+    }
+
+    #[test]
+    fn priority_raise_is_best_effort() {
+        // Must not panic on any platform; returns () either way.
+        raise_priority();
     }
 
     #[test]
