@@ -75,6 +75,10 @@ pub fn deserialize_events(bytes: &[u8]) -> Result<Vec<WireEvent>, &'static str> 
             let p = i16::from_le_bytes(rec[9..11].try_into().unwrap());
             if p >= 0 { Some(p as u8) } else { None }
         };
+        // Only velocity/pan scale the direct mix path in Master::add_voice,
+        // where NaN would poison the delay/reverb buffers too; bass/treble/
+        // comp are re-clamped in VoiceFx::new and the sends pass through
+        // unclamped for parity with native.
         let velocity = f32::from_le_bytes(rec[13..17].try_into().unwrap());
         let pan = f32::from_le_bytes(rec[25..29].try_into().unwrap());
         out.push(WireEvent {
@@ -312,15 +316,17 @@ mod tests {
         use std::collections::HashMap;
 
         let src = "tempo 120\nlet kick = kick()\nloop \"b\":\n    kick << \"x\" delay=0.8 reverb=0.6 bass=0.4 treble=0.3 comp=0.5 pan=0.2\n";
+        // Two bars at tempo 120: reads the delay tap at 0.75 * bar_samples
+        // (frame 72000), so the worklet's delay READ path is pinned too.
         let tl = schedule(
             &parse(&lex(src).unwrap()).unwrap(),
             &HashMap::new(),
             &HashMap::new(),
-            48000,
+            96000,
             48000,
         )
         .unwrap();
-        let native = render_offline(src, 48000, 48000, &HashMap::new()).unwrap();
+        let native = render_offline(src, 96000, 48000, &HashMap::new()).unwrap();
         let wire = serialize(&tl);
 
         unsafe {
@@ -328,7 +334,7 @@ mod tests {
             eng_submit(e, wire.as_ptr(), wire.len());
             let mut out = vec![0.0f32; 128 * 2];
             let mut worklet = Vec::with_capacity(native.len());
-            for _ in 0..48000 / 128 {
+            for _ in 0..96000 / 128 {
                 eng_process(e, out.as_mut_ptr(), 128);
                 worklet.extend_from_slice(&out);
             }
