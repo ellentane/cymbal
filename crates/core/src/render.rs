@@ -237,10 +237,11 @@ mod tests {
 
     #[test]
     fn streamed_render_identical_to_single_shot() {
-        // Constant-tempo, non-cycle source (beat.cym). A single-shot 8-bar
-        // render must equal the streamed render split over two 4-bar windows
-        // (Master + ringing voices carried across the boundary).
-        let src = include_str!("../../../examples/beat.cym");
+        // Constant-tempo, non-cycle source with delay/reverb sends. A 4-bar
+        // seam is crossed by mixer state: the bar-4 kick's delay feedback and
+        // the hat's reverb tail ring into window two, so the carry is
+        // load-bearing (a naive concatenation of independent windows differs).
+        let src = "tempo 120\nlet kick = kick()\nlet hat = hat()\nlet bass = bass()\nloop \"b\":\n    kick << \"x . . x . . x .\" delay=1.0\n    hat << \"x . x . x . x .\" reverb=1.0\n    bass << [c2, f2, g2] \"x . . x . . . .\"\n";
         let single = render_offline(src, 768000, 48000, &HashMap::new()).unwrap();
         let program = parse(&lex(src).unwrap()).unwrap();
         let mut streamed = Vec::new();
