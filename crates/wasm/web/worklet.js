@@ -3,11 +3,18 @@ let eng = 0;
 let mem = null;
 let outPtr = 0;
 let pending = null;
+let pendingSamples = [];
 
 function submit(bytes) {
   const ptr = exp.eng_in_ptr(bytes.length);
   new Uint8Array(mem.buffer).set(bytes, ptr);
   exp.eng_submit(eng, ptr, bytes.length);
+}
+
+function loadSample(id, frames) {
+  const ptr = exp.eng_sample_ptr(frames.length);
+  new Float32Array(mem.buffer).set(frames, ptr / 4);
+  exp.eng_load_sample(id, ptr, frames.length);
 }
 
 function initEngine(module) {
@@ -36,6 +43,10 @@ function initEngine(module) {
     exp.__wbindgen_start();
     eng = exp.eng_alloc(96000n, 48000);
     outPtr = exp.eng_out_ptr();
+    for (const s of pendingSamples) {
+      loadSample(s.id, s.frames);
+    }
+    pendingSamples = [];
     if (pending) {
       submit(pending);
       pending = null;
@@ -59,6 +70,13 @@ class CymbalProcessor extends AudioWorkletProcessor {
           submit(bytes);
         } else {
           pending = bytes;
+        }
+      } else if (msg.type === 'sample') {
+        const frames = new Float32Array(msg.bytes);
+        if (exp) {
+          loadSample(msg.id, frames);
+        } else {
+          pendingSamples.push({ id: msg.id, frames });
         }
       }
     };

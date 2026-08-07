@@ -1,10 +1,12 @@
-import init, { render, serialize_timeline } from './cymbal_wasm.js';
+import init, { render, serialize_timeline, load_sample } from './cymbal_wasm.js';
 
 const ctx = new AudioContext({ sampleRate: 48000 });
 let node = null;
 let ready = null;
 let wasmBytes = null;
 let engineSent = false;
+let nextSampleId = 0;
+const sampleIds = new Map();
 
 const statusEl = document.getElementById('status');
 
@@ -53,6 +55,24 @@ async function ensureNode() {
   return node;
 }
 
+async function loadSampleFile(file) {
+  setStatus('loading ' + file.name);
+  try {
+    await ensureReady();
+    const audio = await ctx.decodeAudioData(await file.arrayBuffer());
+    const f32 = audio.getChannelData(0).slice();
+    const bytes = new Uint8Array(f32.buffer);
+    const id = nextSampleId++;
+    load_sample(id, bytes);
+    sampleIds.set(file.name, id);
+    const n = await ensureNode();
+    n.port.postMessage({ type: 'sample', id, bytes }, [bytes.buffer]);
+    setStatus('sample ' + file.name + ' -> id ' + id);
+  } catch (e) {
+    setStatus(String(e), true);
+  }
+}
+
 async function play(src) {
   const bytes = await loadWasm();
   const n = await ensureNode();
@@ -61,7 +81,7 @@ async function play(src) {
     n.port.postMessage({ type: 'init', module });
     engineSent = true;
   }
-  const timeline = serialize_timeline(src, 3600);
+  const timeline = serialize_timeline(src, 3600, Object.fromEntries(sampleIds));
   n.port.postMessage({ type: 'timeline', bytes: timeline }, [timeline.buffer]);
 }
 
@@ -74,6 +94,10 @@ document.getElementById('play').onclick = async () => {
   } catch (e) {
     setStatus(String(e), true);
   }
+};
+document.getElementById('sample').onchange = (e) => {
+  const file = e.target.files[0];
+  if (file) loadSampleFile(file);
 };
 document.getElementById('render').onclick = async () => {
   setStatus('rendering');

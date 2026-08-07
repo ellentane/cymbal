@@ -1,21 +1,40 @@
 //! Worklet engine: full native DSP — `Master` (delay/reverb sends) and
-//! per-voice `bass`/`treble`/`comp`. Sample voices land in D3; sample_id is
-//! carried on the wire but not applied yet.
+//! per-voice `bass`/`treble`/`comp`. Sample voices are loaded into a registry
+//! (`eng_load_sample`) and referenced by the wire's sample_id.
 
 use cymbal_core::ast::VoiceKind;
 use cymbal_core::dsp::{Voice, VoiceParams};
 use cymbal_core::mixer::{Master, VoiceOutput};
-use cymbal_core::scheduler::Timeline;
+use cymbal_core::scheduler::{SampleData, Timeline};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Fixed 64-byte record (LE): offset u64, voice u8, pitch i16 (-1 = none),
 /// semitone i16, velocity f32, duration u64, pan f32, delay f32, reverb f32,
 /// bass f32, treble f32, comp f32, sample_id u16, start f32 (0..1), end f32
 /// (0..1), cycle u8, pad 4.
-pub fn serialize(tl: &Timeline) -> Vec<u8> {
+///
+/// `samples` maps path -> data (the same map handed to `schedule`); `ids`
+/// maps path -> registry id. Events carry only the `Arc` clone, so the
+/// per-event path is recovered by Arc identity.
+pub fn serialize(
+    tl: &Timeline,
+    samples: &HashMap<String, Arc<SampleData>>,
+    ids: &HashMap<String, u16>,
+) -> Vec<u8> {
+    let id_of: HashMap<*const SampleData, u16> = samples
+        .iter()
+        .filter_map(|(path, data)| ids.get(path).map(|id| (Arc::as_ptr(data), *id)))
+        .collect();
     let mut out = Vec::with_capacity(16 + tl.events.len() * 64);
     out.extend_from_slice(&tl.bar_samples.to_le_bytes());
     out.extend_from_slice(&(tl.events.len() as u64).to_le_bytes());
     for ev in &tl.events {
+        let sample_id = ev
+            .sample
+            .as_ref()
+            .map(|data| id_of.get(&Arc::as_ptr(data)).copied().unwrap_or(0))
+            .unwrap_or(0);
         out.extend_from_slice(&ev.sample_offset.to_le_bytes());
         out.push(ev.voice as u8);
         out.extend_from_slice(&(ev.pitch.map(|p| p as i16).unwrap_or(-1)).to_le_bytes());
@@ -28,7 +47,7 @@ pub fn serialize(tl: &Timeline) -> Vec<u8> {
         out.extend_from_slice(&ev.bass.to_le_bytes());
         out.extend_from_slice(&ev.treble.to_le_bytes());
         out.extend_from_slice(&ev.comp.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&sample_id.to_le_bytes());
         out.extend_from_slice(&(ev.sample_start as f32).to_le_bytes());
         out.extend_from_slice(&(ev.sample_end as f32).to_le_bytes());
         out.push(ev.sample_loop as u8);
@@ -115,6 +134,33 @@ struct Ev {
     bass: f32,
     treble: f32,
     comp: f32,
+    sample: Option<Arc<SampleData>>,
+    sample_start: f64,
+    sample_end: f64,
+    sample_cycle: bool,
+}
+
+/// Sample registry, shared by `eng_load_sample` (worklet thread) and the
+/// bindgen `load_sample` (main thread): each wasm instance owns its own copy.
+static SAMPLES: Mutex<Vec<Option<Arc<SampleData>>>> = Mutex::new(Vec::new());
+
+pub(crate) fn register_sample(id: u32, frames: Vec<f32>, sample_rate: u32) {
+    let mut reg = SAMPLES.lock().unwrap();
+    if reg.len() <= id as usize {
+        reg.resize(id as usize + 1, None);
+    }
+    reg[id as usize] = Some(Arc::new(SampleData {
+        frames: Arc::new(frames),
+        sample_rate,
+    }));
+}
+
+pub(crate) fn registered_sample(id: u16) -> Option<Arc<SampleData>> {
+    SAMPLES
+        .lock()
+        .unwrap()
+        .get(id as usize)
+        .and_then(|s| s.clone())
 }
 
 pub struct Eng {
@@ -179,7 +225,18 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
             2 => VoiceKind::Hat,
             3 => VoiceKind::Bass,
             4 => VoiceKind::Lead,
+            5 => VoiceKind::Sample,
             _ => continue,
+        };
+        let sample = if kind == VoiceKind::Sample {
+            // `Voice::new` panics without data; unresolved ids are dropped
+            // (the caller may not have loaded the file yet).
+            let Some(data) = registered_sample(w.sample_id) else {
+                continue;
+            };
+            Some(data)
+        } else {
+            None
         };
         eng.future.push((
             w.sample_offset,
@@ -195,6 +252,10 @@ pub unsafe extern "C" fn eng_submit(e: *mut Eng, data: *const u8, len: usize) {
                 bass: w.bass,
                 treble: w.treble,
                 comp: w.comp,
+                sample,
+                sample_start: w.start as f64,
+                sample_end: w.end as f64,
+                sample_cycle: w.cycle != 0,
             },
         ));
     }
@@ -229,6 +290,10 @@ pub unsafe extern "C" fn eng_process(e: *mut Eng, out: *mut f32, frames: u32) {
                         bass: ev.bass,
                         treble: ev.treble,
                         comp: ev.comp,
+                        sample: ev.sample.clone(),
+                        sample_start: ev.sample_start,
+                        sample_end: ev.sample_end,
+                        sample_cycle: ev.sample_cycle,
                         ..VoiceParams::default_for(ev.kind, ev.pitch)
                     },
                     eng.sample_rate,
@@ -287,6 +352,37 @@ pub extern "C" fn eng_in_ptr(len: usize) -> *mut u8 {
     }
 }
 
+/// Scratch buffer for raw f32 sample data; JS fills it, then calls
+/// `eng_load_sample`. Views over `mem.buffer` must be re-created after any
+/// call, since growth may detach the old buffer.
+static mut SMP_BUF: *mut Vec<f32> = std::ptr::null_mut();
+
+#[unsafe(no_mangle)]
+pub extern "C" fn eng_sample_ptr(frames: usize) -> *mut f32 {
+    unsafe {
+        if SMP_BUF.is_null() {
+            SMP_BUF = Box::into_raw(Box::new(Vec::with_capacity(1024)));
+        }
+        let v = &mut *SMP_BUF;
+        if v.len() < frames {
+            v.resize(frames, 0.0);
+        }
+        v.as_mut_ptr()
+    }
+}
+
+/// # Safety
+/// `ptr` must point to `len` readable f32 frames in wasm linear memory (see
+/// `eng_sample_ptr`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eng_load_sample(id: u32, ptr: *const f32, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let frames = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    register_sample(id, frames, 48000);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +423,7 @@ mod tests {
         )
         .unwrap();
         let native = render_offline(src, 96000, 48000, &HashMap::new()).unwrap();
-        let wire = serialize(&tl);
+        let wire = serialize(&tl, &HashMap::new(), &HashMap::new());
 
         unsafe {
             let e = eng_alloc(tl.bar_samples, 48000);
@@ -347,7 +443,103 @@ mod tests {
     }
 
     #[test]
+    fn sample_voice_renders_from_registry() {
+        use cymbal_core::lexer::lex;
+        use cymbal_core::parser::parse;
+        use cymbal_core::scheduler::{SampleData, schedule};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let frames: Vec<f32> = (0..64)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let mut samples = HashMap::new();
+        samples.insert(
+            "kick.wav".to_string(),
+            Arc::new(SampleData {
+                frames: Arc::new(frames.clone()),
+                sample_rate: 48000,
+            }),
+        );
+        let mut ids = HashMap::new();
+        ids.insert("kick.wav".to_string(), 7u16);
+        let src = "tempo 120\nloop \"b\":\n    sample \"kick.wav\" << \"x\"\n";
+        let tl = schedule(
+            &parse(&lex(src).unwrap()).unwrap(),
+            &HashMap::new(),
+            &samples,
+            48000,
+            48000,
+        )
+        .unwrap();
+        let wire = serialize(&tl, &samples, &ids);
+        unsafe {
+            let e = eng_alloc(tl.bar_samples, 48000);
+            eng_load_sample(7, frames.as_ptr(), frames.len());
+            eng_submit(e, wire.as_ptr(), wire.len());
+            let mut out = vec![0.0f32; 128 * 2];
+            eng_process(e, out.as_mut_ptr(), 128);
+            eng_free(e);
+            assert!(
+                out.iter().any(|s| *s != 0.0),
+                "sample voice must render from the registry"
+            );
+            assert!(out.iter().all(|s| s.is_finite()));
+        }
+    }
+
+    #[test]
+    fn unresolved_sample_id_is_skipped_not_panicked() {
+        use cymbal_core::lexer::lex;
+        use cymbal_core::parser::parse;
+        use cymbal_core::scheduler::{SampleData, schedule};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let data = Arc::new(SampleData {
+            frames: Arc::new(vec![0.0; 64]),
+            sample_rate: 48000,
+        });
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), data);
+        let mut ids = HashMap::new();
+        ids.insert("kick.wav".to_string(), 99u16);
+        let src = "tempo 120\nloop \"b\":\n    sample \"kick.wav\" << \"x\"\n";
+        let tl = schedule(
+            &parse(&lex(src).unwrap()).unwrap(),
+            &HashMap::new(),
+            &samples,
+            48000,
+            48000,
+        )
+        .unwrap();
+        let wire = serialize(&tl, &samples, &ids);
+        unsafe {
+            let e = eng_alloc(tl.bar_samples, 48000);
+            eng_submit(e, wire.as_ptr(), wire.len());
+            let mut out = vec![0.0f32; 128 * 2];
+            eng_process(e, out.as_mut_ptr(), 128);
+            eng_free(e);
+            assert!(
+                out.iter().all(|s| *s == 0.0),
+                "a missing registry entry must be skipped, not panicked"
+            );
+        }
+    }
+
+    #[test]
     fn wire_v2_round_trips_fx_and_sample_fields() {
+        use cymbal_core::scheduler::SampleData;
+        use std::sync::Arc;
+
+        let data = Arc::new(SampleData {
+            frames: Arc::new(vec![0.0; 64]),
+            sample_rate: 48000,
+        });
+        let mut samples = HashMap::new();
+        samples.insert("kick.wav".to_string(), data.clone());
+        let mut ids = HashMap::new();
+        ids.insert("kick.wav".to_string(), 7u16);
         let ev = Event {
             sample_offset: 123456,
             loop_name: String::new(),
@@ -364,12 +556,12 @@ mod tests {
             bass: 0.5,
             treble: 0.6,
             comp: 0.7,
-            sample: None,
+            sample: Some(data),
             sample_start: 0.25,
             sample_end: 0.75,
             sample_loop: true,
         };
-        let bytes = serialize(&timeline_with(ev));
+        let bytes = serialize(&timeline_with(ev), &samples, &ids);
         let events = deserialize_events(&bytes).expect("well-formed wire data");
         assert_eq!(events.len(), 1);
         let w = &events[0];
@@ -385,7 +577,7 @@ mod tests {
         assert_eq!(w.bass, 0.5_f32);
         assert_eq!(w.treble, 0.6_f32);
         assert_eq!(w.comp, 0.7_f32);
-        assert_eq!(w.sample_id, 0, "registry ids land in D3; 0 for now");
+        assert_eq!(w.sample_id, 7, "serialize must wire the registry id");
         assert_eq!(w.start, 0.25_f32);
         assert_eq!(w.end, 0.75_f32);
         assert_eq!(w.cycle, 1);

@@ -69,7 +69,24 @@
         gap: 12px;
         margin-top: 16px;
         align-items: center;
+        flex-wrap: wrap;
       }
+      .sample-label {
+        color: var(--dim);
+        font-size: 0.9rem;
+        margin-left: 8px;
+      }
+      input[type='file'] {
+        color: var(--dim);
+        font-size: 0.85rem;
+        max-width: 220px;
+      }
+      .hint {
+        margin: 10px 0 0;
+        color: var(--dim);
+        font-size: 0.82rem;
+      }
+      .hint code { color: var(--accent-dim); }
       button {
         padding: 10px 22px;
         border: 1px solid var(--line);
@@ -117,8 +134,11 @@ loop "b":
       <div class="controls">
         <button id="play" class="play">play</button>
         <button id="render">render wav</button>
+        <label for="sample" class="sample-label">sample:</label>
+        <input id="sample" type="file" accept=".wav" />
         <span id="status"></span>
       </div>
+      <p class="hint">load a .wav whose filename matches a <code>sample "name.wav"</code> path in the source; only the first channel is used</p>
     </main>
     <footer>
       <a href="https://github.com/ellentane/cymbal">github.com/ellentane/cymbal</a>

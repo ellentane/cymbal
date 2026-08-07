@@ -399,6 +399,7 @@ name = "cymbal-wasm"
 version = "0.1.0"
 dependencies = [
  "cymbal-core",
+ "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

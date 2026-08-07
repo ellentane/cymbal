@@ -1,8 +1,10 @@
 use cymbal_core::lexer::lex;
 use cymbal_core::parser::parse;
 use cymbal_core::render::render_offline;
-use cymbal_core::scheduler::schedule;
+use cymbal_core::scheduler::{SampleData, schedule};
 use std::collections::HashMap;
+use std::sync::Arc;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 pub mod engine;
@@ -16,18 +18,59 @@ pub fn render(src: &str, seconds: u32) -> Result<Vec<f32>, JsError> {
     render_offline(src, seconds as u64 * 48000, 48000, &HashMap::new()).map_err(to_js_err)
 }
 
+/// Stores raw f32 frames (little-endian bytes) at registry `id` in this
+/// instance's memory, mirroring `engine::eng_load_sample` on the main thread.
 #[wasm_bindgen]
-pub fn serialize_timeline(src: &str, seconds: u32) -> Result<Vec<u8>, JsError> {
+pub fn load_sample(id: u32, bytes: &[u8]) -> Result<(), JsError> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(JsError::new("sample data must be f32 frames"));
+    }
+    let frames = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    engine::register_sample(id, frames, 48000);
+    Ok(())
+}
+
+/// `samples` is a JS object mapping sample paths to registry ids, e.g.
+/// `{ "kick.wav": 0 }`; ids the engine has no data for surface as the
+/// scheduler's "sample 'path' not loaded" error.
+#[wasm_bindgen]
+pub fn serialize_timeline(src: &str, seconds: u32, samples: &JsValue) -> Result<Vec<u8>, JsError> {
     let program = parse(&lex(src).map_err(to_js_err)?).map_err(to_js_err)?;
+    let mut ids: HashMap<String, u16> = HashMap::new();
+    if samples.is_object() {
+        let obj: &js_sys::Object = samples.unchecked_ref();
+        for key in js_sys::Object::keys(obj).iter() {
+            let Some(path) = key.as_string() else {
+                continue;
+            };
+            let Some(id) = js_sys::Reflect::get(obj, &key)
+                .ok()
+                .and_then(|v| v.as_f64())
+                .map(|f| f as u16)
+            else {
+                continue;
+            };
+            ids.insert(path, id);
+        }
+    }
+    let mut sample_map: HashMap<String, Arc<SampleData>> = HashMap::new();
+    for (path, id) in &ids {
+        if let Some(data) = engine::registered_sample(*id) {
+            sample_map.insert(path.clone(), data);
+        }
+    }
     let tl = schedule(
         &program,
         &HashMap::new(),
-        &HashMap::new(),
+        &sample_map,
         seconds as u64 * 48000,
         48000,
     )
     .map_err(to_js_err)?;
-    Ok(engine::serialize(&tl))
+    Ok(engine::serialize(&tl, &sample_map, &ids))
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -46,7 +89,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn serialize_round_trips() {
-        let bytes = serialize_timeline(SRC, 4).unwrap();
+        let bytes = serialize_timeline(SRC, 4, &JsValue::UNDEFINED).unwrap();
         let events = engine::deserialize_events(&bytes).unwrap();
         // 4s at 120bpm = 2 bars: kick "x . . x" -> 4 kicks, hat "x . x ." -> 4 hats
         assert_eq!(events.len(), 8);
@@ -67,7 +110,7 @@ mod tests {
     fn engine_smoke() {
         unsafe {
             let e = engine::eng_alloc(24000, 48000);
-            let bytes = serialize_timeline(SRC, 1).unwrap();
+            let bytes = serialize_timeline(SRC, 1, &JsValue::UNDEFINED).unwrap();
             engine::eng_submit(e, bytes.as_ptr(), bytes.len());
             let mut out = vec![0.0f32; 48000 * 2];
             engine::eng_process(e, out.as_mut_ptr(), 48000);
@@ -105,7 +148,7 @@ mod tests {
     fn engine_clamps_non_finite_wire_values() {
         unsafe {
             let e = engine::eng_alloc(24000, 48000);
-            let mut bytes = serialize_timeline(SRC, 1).unwrap();
+            let mut bytes = serialize_timeline(SRC, 1, &JsValue::UNDEFINED).unwrap();
             bytes[16 + 13..16 + 17].copy_from_slice(&f32::NAN.to_le_bytes());
             bytes[16 + 25..16 + 29].copy_from_slice(&f32::INFINITY.to_le_bytes());
             engine::eng_submit(e, bytes.as_ptr(), bytes.len());
@@ -123,7 +166,7 @@ mod tests {
     fn eng_process_clamps_frames_to_scratch_size() {
         unsafe {
             let e = engine::eng_alloc(24000, 48000);
-            let bytes = serialize_timeline(SRC, 1).unwrap();
+            let bytes = serialize_timeline(SRC, 1, &JsValue::UNDEFINED).unwrap();
             engine::eng_submit(e, bytes.as_ptr(), bytes.len());
             let mut out = vec![f32::NAN; 256 * 2];
             engine::eng_process(e, out.as_mut_ptr(), 256);
