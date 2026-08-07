@@ -36,7 +36,7 @@ const SAMPLE_RATE: u32 = 48000;
 const RENDER_DEFAULT_SECONDS: u64 = 120;
 
 enum UiMsg {
-    Err(Error),
+    Err(Error, Option<u64>),
     Info(String),
     RecordError(String),
     Help(String),
@@ -65,7 +65,7 @@ fn next_loop_generations(
 
 fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
     match msg {
-        UiMsg::Err(e) => status.set_error(e.to_string()),
+        UiMsg::Err(e, _) => status.set_error(e.to_string()),
         UiMsg::Info(s) => {
             status.clear_error();
             status.message = s;
@@ -78,10 +78,12 @@ fn handle_reloaded(
     status: &mut Status,
     latest: &mut HashMap<String, u64>,
     latest_seq: &mut u64,
+    recent: &mut Vec<(u64, Vec<String>)>,
     generations: HashMap<String, u64>,
     loops: Vec<String>,
     seq: u64,
 ) {
+    record_reload(recent, seq, loops.clone());
     if seq <= *latest_seq {
         return;
     }
@@ -107,7 +109,7 @@ fn is_stale(seq: u64, latest_seq: u64) -> bool {
 
 fn record_reload(recent: &mut Vec<(u64, Vec<String>)>, seq: u64, loops: Vec<String>) {
     recent.push((seq, loops));
-    if recent.len() > 4 {
+    if recent.len() > 64 {
         recent.remove(0);
     }
 }
@@ -413,12 +415,12 @@ fn spawn_reload(
                     let _ = queue.send(Msg::Swap(Arc::new(tl), seq, spares));
                 }
                 Err(e) => {
-                    let _ = msg_tx.send(UiMsg::Err(e));
+                    let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
                 }
             }
         }
         Err(e) => {
-            let _ = msg_tx.send(UiMsg::Err(e));
+            let _ = msg_tx.send(UiMsg::Err(e, Some(seq)));
         }
     });
 }
@@ -924,16 +926,22 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                                 )));
                                             }
                                             Err(e) => {
-                                                let _ = tx.send(UiMsg::Err(Error::new(
-                                                    cymbal_core::error::Span { line: 0, col: 0 },
-                                                    cymbal_core::error::ErrorKind::Io,
-                                                    format!("export failed: {e}"),
-                                                )));
+                                                let _ = tx.send(UiMsg::Err(
+                                                    Error::new(
+                                                        cymbal_core::error::Span {
+                                                            line: 0,
+                                                            col: 0,
+                                                        },
+                                                        cymbal_core::error::ErrorKind::Io,
+                                                        format!("export failed: {e}"),
+                                                    ),
+                                                    None,
+                                                ));
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        let _ = tx.send(UiMsg::Err(e));
+                                        let _ = tx.send(UiMsg::Err(e, None));
                                     }
                                 }
                             });
@@ -1086,13 +1094,11 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         loops,
                         seq,
                     } => {
-                        if seq > latest_seq {
-                            record_reload(&mut recent, seq, loops.clone());
-                        }
                         handle_reloaded(
                             &mut status,
                             &mut latest_loops,
                             &mut latest_seq,
+                            &mut recent,
                             generations,
                             loops,
                             seq,
@@ -1109,13 +1115,16 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     ));
                                 }
                                 FlushAction::Lost => {
-                                    let _ = msg_tx.send(UiMsg::Err(Error::new(
-                                        cymbal_core::error::Span { line: 0, col: 0 },
-                                        cymbal_core::error::ErrorKind::Io,
-                                        format!(
-                                            "lost mid-recording track claim (seq {seq}): reload out of order"
+                                    let _ = msg_tx.send(UiMsg::Err(
+                                        Error::new(
+                                            cymbal_core::error::Span { line: 0, col: 0 },
+                                            cymbal_core::error::ErrorKind::Io,
+                                            format!(
+                                                "lost mid-recording track claim (seq {seq}): loop missing from reload"
+                                            ),
                                         ),
-                                    )));
+                                        None,
+                                    ));
                                 }
                                 FlushAction::Ignore => {}
                             }
@@ -1133,6 +1142,37 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                         join_writers(&mut record_writers, Instant::now() + Duration::from_secs(5));
                         status.recording = false;
+                    }
+                    UiMsg::Err(e, seq) => {
+                        if let Some(seq) = seq {
+                            for (loop_index, _, rec) in drain_pending(&mut pending, seq) {
+                                match flush_claim(seq, loop_index, &recent, record_ts.is_some()) {
+                                    FlushAction::Spawn(name) => {
+                                        record_writers.push(spawn_track_writer(
+                                            &rec,
+                                            &name,
+                                            record_ts.as_deref(),
+                                            record_dir.as_deref(),
+                                            &msg_tx,
+                                        ));
+                                    }
+                                    FlushAction::Lost => {
+                                        let _ = msg_tx.send(UiMsg::Err(
+                                            Error::new(
+                                                cymbal_core::error::Span { line: 0, col: 0 },
+                                                cymbal_core::error::ErrorKind::Io,
+                                                format!(
+                                                    "lost mid-recording track claim (seq {seq}): reload failed"
+                                                ),
+                                            ),
+                                            None,
+                                        ));
+                                    }
+                                    FlushAction::Ignore => {}
+                                }
+                            }
+                        }
+                        status.set_error(e.to_string());
                     }
                     UiMsg::Help(text) => {
                         help_override = Some(text);
@@ -1171,11 +1211,14 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         }
                         ClaimAction::Pend => {}
                         ClaimAction::Stale => {
-                            let _ = msg_tx.send(UiMsg::Err(Error::new(
-                                cymbal_core::error::Span { line: 0, col: 0 },
-                                cymbal_core::error::ErrorKind::Io,
-                                format!("stale mid-recording track claim (seq {seq})"),
-                            )));
+                            let _ = msg_tx.send(UiMsg::Err(
+                                Error::new(
+                                    cymbal_core::error::Span { line: 0, col: 0 },
+                                    cymbal_core::error::ErrorKind::Io,
+                                    format!("stale mid-recording track claim (seq {seq})"),
+                                ),
+                                None,
+                            ));
                         }
                         ClaimAction::Ignore => {}
                     },
@@ -1464,6 +1507,7 @@ mod tests {
         let mut status = Status::new();
         let mut latest = HashMap::new();
         let mut latest_seq = 0;
+        let mut recent = Vec::new();
         let mut gens = HashMap::new();
         gens.insert("b".to_string(), 1u64);
         latest.insert("b".to_string(), 1u64);
@@ -1471,6 +1515,7 @@ mod tests {
             &mut status,
             &mut latest,
             &mut latest_seq,
+            &mut recent,
             gens.clone(),
             vec!["b".to_string()],
             1,
@@ -1479,6 +1524,7 @@ mod tests {
         assert_eq!(status.message, "reloaded: nothing changed");
         assert_eq!(latest, gens);
         assert_eq!(latest_seq, 1);
+        assert_eq!(recent, vec![(1, vec!["b".to_string()])]);
     }
 
     #[test]
@@ -1488,6 +1534,7 @@ mod tests {
         latest.insert("a".to_string(), 1u64);
         latest.insert("b".to_string(), 1u64);
         let mut latest_seq = 0;
+        let mut recent = Vec::new();
         let mut gens = HashMap::new();
         gens.insert("a".to_string(), 1u64);
         gens.insert("b".to_string(), 2u64);
@@ -1495,6 +1542,7 @@ mod tests {
             &mut status,
             &mut latest,
             &mut latest_seq,
+            &mut recent,
             gens,
             vec!["a".to_string(), "b".to_string()],
             1,
@@ -1508,6 +1556,7 @@ mod tests {
         let mut latest = HashMap::new();
         latest.insert("b".to_string(), 2u64);
         let mut latest_seq = 0;
+        let mut recent = Vec::new();
         let mut gens = HashMap::new();
         gens.insert("b".to_string(), 2u64);
         gens.insert("k".to_string(), 3u64);
@@ -1515,6 +1564,7 @@ mod tests {
             &mut status,
             &mut latest,
             &mut latest_seq,
+            &mut recent,
             gens,
             vec!["b".to_string(), "k".to_string()],
             1,
@@ -1531,12 +1581,14 @@ mod tests {
         let mut latest = HashMap::new();
         latest.insert("a".to_string(), 5u64);
         let mut latest_seq = 3;
+        let mut recent = Vec::new();
         let mut gens = HashMap::new();
         gens.insert("z".to_string(), 9u64);
         handle_reloaded(
             &mut status,
             &mut latest,
             &mut latest_seq,
+            &mut recent,
             gens,
             vec!["z".to_string()],
             3,
@@ -1545,6 +1597,11 @@ mod tests {
         assert_eq!(status.message, "reloaded: a");
         assert_eq!(latest.get("z"), None);
         assert_eq!(latest_seq, 3);
+        assert_eq!(
+            recent,
+            vec![(3, vec!["z".to_string()])],
+            "a stale seq is still recorded in arrival order"
+        );
     }
 
     #[test]
@@ -1876,12 +1933,12 @@ mod tests {
     }
 
     #[test]
-    fn claim_history_bounded_to_four() {
+    fn claim_history_bounded_to_sixty_four() {
         let mut recent = Vec::new();
-        for seq in 1..=5 {
+        for seq in 1..=65 {
             record_reload(&mut recent, seq, vec![format!("l{seq}")]);
         }
-        assert_eq!(recent.len(), 4);
+        assert_eq!(recent.len(), 64);
         assert_eq!(recent.first().unwrap().0, 2, "oldest entry evicted");
     }
 
@@ -2030,7 +2087,9 @@ mod tests {
     }
 
     #[test]
-    fn flush_claim_reports_lost_when_reload_arrived_out_of_order() {
+    fn flush_claim_reports_lost_when_reload_failed() {
+        // a claim pended for a reload that errored never resolves: the
+        // reload-error path flushes it and reports it loudly.
         let recent: Vec<(u64, Vec<String>)> = vec![(2, vec!["b".to_string()])];
         let mut pending: PendingClaims = HashMap::new();
         let rec = cymbal_audio::recorder::Recorder::new(4, 4);
@@ -2042,11 +2101,11 @@ mod tests {
         assert_eq!(
             drained.len(),
             1,
-            "the pended claim is drained on its reload"
+            "the pended claim is drained when its reload errors"
         );
         assert!(
             matches!(flush_claim(3, 0, &recent, true), FlushAction::Lost),
-            "an out-of-order reload loses the claim loudly, not silently"
+            "a reload that never lands loses the claim loudly, not silently"
         );
     }
 
@@ -2057,6 +2116,46 @@ mod tests {
             flush_claim(3, 0, &recent, false),
             FlushAction::Ignore
         ));
+    }
+
+    #[test]
+    fn out_of_order_reloads_resolve_claims() {
+        // reload seq 6 arrives before seq 5; a TrackClaimed for seq 5 must
+        // resolve to Spawn once seq 5's Reloaded arrives — never Lost.
+        let mut recent: Vec<(u64, Vec<String>)> = vec![(6, vec!["h".to_string()])];
+        let mut pending: PendingClaims = HashMap::new();
+        let rec = cymbal_audio::recorder::Recorder::new(4, 4);
+        // claim(seq 5) -> Pend
+        assert!(matches!(
+            handle_claim(&rec, 5, 0, &recent, &mut pending, 5, true),
+            ClaimAction::Pend
+        ));
+        // Reloaded(seq 5) arrives -> recorded in arrival order
+        let mut status = Status::new();
+        let mut latest = HashMap::new();
+        let mut latest_seq = 5;
+        let mut gens = HashMap::new();
+        gens.insert("b".to_string(), 1u64);
+        handle_reloaded(
+            &mut status,
+            &mut latest,
+            &mut latest_seq,
+            &mut recent,
+            gens,
+            vec!["b".to_string()],
+            5,
+        );
+        assert_eq!(
+            recent.last().map(|(s, _)| *s),
+            Some(5),
+            "the out-of-order reload is still recorded"
+        );
+        // drain_pending -> flush_claim -> Spawn, never Lost
+        assert_eq!(drain_pending(&mut pending, 5).len(), 1);
+        assert!(
+            matches!(flush_claim(5, 0, &recent, true), FlushAction::Spawn(name) if name == "b"),
+            "an out-of-order reload resolves the claim to Spawn, never Lost"
+        );
     }
 
     #[test]
