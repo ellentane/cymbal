@@ -291,6 +291,9 @@ fn writer_step(
                 st.period = Duration::from_secs_f64(60.0 / (tempo.max(1.0) * 24.0));
                 st.deferred.clear();
             }
+            MidiItem::Sys { bytes, len } => {
+                send(&bytes[..len as usize]);
+            }
             item => {
                 let Some((o0, t0)) = st.origin else {
                     continue;
@@ -298,8 +301,7 @@ fn writer_step(
                 let (offset, clock) = match &item {
                     MidiItem::Clock { offset } => (*offset, true),
                     MidiItem::Note { offset, .. } => (*offset, false),
-                    MidiItem::Sys { .. } => (0, false),
-                    MidiItem::Rebase { .. } => unreachable!(),
+                    MidiItem::Sys { .. } | MidiItem::Rebase { .. } => unreachable!(),
                 };
                 let target =
                     t0 + Duration::from_secs_f64((offset as f64 - o0 as f64).max(0.0) / 48000.0);
@@ -587,5 +589,48 @@ mod tests {
         }
         assert_eq!(sent.len(), 20, "every clock must dispatch");
         assert!(sent.iter().all(|b| b == &vec![0xF8]));
+    }
+
+    #[test]
+    fn sys_dispatches_without_origin() {
+        let rx = Arc::new(ArrayQueue::new(16));
+        let _ = rx.push(MidiItem::Sys {
+            bytes: [0xFA, 0, 0],
+            len: 1,
+        });
+        let sleeper = FakeSleeper::new(Instant::now());
+        let mut sent: Vec<Vec<u8>> = Vec::new();
+        let mut st = WriterState::new();
+        writer_step(&rx, &mut |b| sent.push(b.to_vec()), &sleeper, &mut st);
+        assert_eq!(
+            sent,
+            vec![vec![0xFA]],
+            "Sys must dispatch without an origin"
+        );
+    }
+
+    #[test]
+    fn sys_is_not_deferred_behind_queued_clock() {
+        let rx = Arc::new(ArrayQueue::new(16));
+        let _ = rx.push(MidiItem::Rebase {
+            offset: 0,
+            tempo: 120.0,
+        });
+        let _ = rx.push(MidiItem::Sys {
+            bytes: [0xFC, 0, 0],
+            len: 1,
+        });
+        let _ = rx.push(MidiItem::Clock { offset: 48 });
+        let sleeper = FakeSleeper::new(Instant::now());
+        let mut sent: Vec<Vec<u8>> = Vec::new();
+        let mut st = WriterState::new();
+        writer_step(&rx, &mut |b| sent.push(b.to_vec()), &sleeper, &mut st);
+        assert_eq!(
+            sent,
+            vec![vec![0xFC]],
+            "Sys is sent immediately, before the clock's send-ahead wake"
+        );
+        writer_step(&rx, &mut |b| sent.push(b.to_vec()), &sleeper, &mut st);
+        assert_eq!(sent, vec![vec![0xFC], vec![0xF8]]);
     }
 }
