@@ -9,7 +9,7 @@ use crate::midi_out::{MidiItem, MidiOut};
 use crate::recorder::Recorder;
 use crate::ui_queue::{UiEvent, UiQueue};
 
-const SPARE_WATERMARK: usize = 32;
+pub const SPARE_WATERMARK: usize = 32;
 
 struct RecState {
     rec: Arc<Recorder>,

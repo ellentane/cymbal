@@ -494,7 +494,8 @@ fn record_loop(
 }
 
 fn spares_needed(new_names: &[String], old: &HashMap<String, u64>) -> usize {
-    new_names.iter().filter(|n| !old.contains_key(*n)).count() + 8
+    (new_names.iter().filter(|n| !old.contains_key(*n)).count() + 8)
+        .min(cymbal_audio::engine::SPARE_WATERMARK)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2948,7 +2949,18 @@ mod tests {
     fn spares_needed_counts_replaced_loops() {
         let old: HashMap<String, u64> = (0..30).map(|i| (format!("old-{i}"), 1u64)).collect();
         let new_names: Vec<String> = (0..30).map(|i| format!("new-{i}")).collect();
-        assert_eq!(spares_needed(&new_names, &old), 38);
+        assert_eq!(spares_needed(&new_names, &old), 32);
+    }
+
+    #[test]
+    fn spares_needed_clamps_at_the_watermark() {
+        let old: HashMap<String, u64> = (0..60).map(|i| (format!("old-{i}"), 1u64)).collect();
+        let under: Vec<String> = (0..23).map(|i| format!("new-{i}")).collect();
+        let exact: Vec<String> = (0..24).map(|i| format!("new-{i}")).collect();
+        let over: Vec<String> = (0..40).map(|i| format!("new-{i}")).collect();
+        assert_eq!(spares_needed(&under, &old), 31, "below the watermark");
+        assert_eq!(spares_needed(&exact, &old), 32, "exactly at the watermark");
+        assert_eq!(spares_needed(&over, &old), 32, "clamped to the watermark");
     }
 
     #[test]
