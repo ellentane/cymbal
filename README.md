@@ -20,7 +20,7 @@ cargo run --release -- --midi examples/beat.cym   # live TUI with MIDI note/cloc
 Open any `.cym` file to start the live editor. Errors are shown inline and
 playback always continues with the last good schedule. `make play` / `make
 export` are shortcuts for the examples above; `render` also accepts a length in
-seconds — any length, streamed in 300-second windows:
+seconds — the renderer streams it in 300-second windows:
 `cargo run --release -- render examples/groove.cym groove.wav 30`.
 `--midi [port]` opens the named MIDI output port (the first available one when
 omitted) and streams note-on/off plus a 24 PPQN clock from a real-time writer
