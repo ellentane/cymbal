@@ -1361,11 +1361,18 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         src,
                     } => {
                         let accepted = seq > latest_seq;
-                        let action = scheduler.on_reload_settled(if accepted {
-                            Some(window_end)
+                        let action = if accepted {
+                            scheduler.on_reload_settled(Some(window_end))
                         } else {
-                            None
-                        });
+                            // Stale: a newer reload's settle already ran. Its
+                            // outcome must not write the scheduler's result —
+                            // a superseded reload neither applied a swap nor
+                            // left the pipeline un-driven, and recording it
+                            // as a failure would let a late segment failure
+                            // dispatch a retry that displaces the newer
+                            // reload's queued swap.
+                            SegmentAction::None
+                        };
                         if accepted {
                             applied_src = src;
                         }
@@ -1415,7 +1422,17 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     }
                     UiMsg::Err(e, seq) => {
                         if let Some(seq) = seq {
-                            let action = scheduler.on_reload_settled(None);
+                            // Only a reload outcome that is still the newest
+                            // settles the scheduler: a stale error (a newer
+                            // reload already settled) must not flip the result
+                            // to failure, or a late segment failure would
+                            // dispatch a retry that displaces the newer
+                            // reload's queued swap.
+                            let action = if seq > latest_seq {
+                                scheduler.on_reload_settled(None)
+                            } else {
+                                SegmentAction::None
+                            };
                             flush_pending_claims(
                                 seq,
                                 &mut pending,
