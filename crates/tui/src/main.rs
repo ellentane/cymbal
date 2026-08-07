@@ -39,7 +39,7 @@ const MAX_SAMPLES: u64 = 3600 * 48000;
 const SAMPLE_RATE: u32 = 48000;
 const RENDER_DEFAULT_SECONDS: u64 = 120;
 const WINDOW_LEN: u64 = cymbal_core::render::STREAM_WINDOW_LEN;
-const UNDERUNN_MSG: &str = "segment underrun — waiting for next window";
+const UNDERRUN_MSG: &str = "segment underrun — waiting for next window";
 
 #[derive(Debug)]
 enum UiMsg {
@@ -85,6 +85,16 @@ fn apply_ui_msg(status: &mut Status, msg: UiMsg) {
             status.message = s;
         }
         _ => {}
+    }
+}
+
+// A segment-family message (underrun warning, retry notice) is only true
+// while the pipeline is in that state: a successful swap ends it, so the
+// status falls back to the default. Other user-facing messages ("reloaded:
+// ...", "MIDI queue overflow ...") are untouched.
+fn clear_segment_message(status: &mut Status) {
+    if status.message.starts_with("segment") {
+        status.message = Status::DEFAULT_MESSAGE.into();
     }
 }
 
@@ -609,8 +619,15 @@ impl SegmentSpawner<'_> {
             self.queue.clone(),
         );
         if retries > 0 {
-            status.clear_error();
-            status.message = format!("segment failed; retrying ({retries}/2)");
+            // The failure was already reported into status.error (e.g. the
+            // density-cap hint); fold it into the retry message so the
+            // actionable hint survives to the render instead of being cleared.
+            let hint = status
+                .error
+                .take()
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default();
+            status.message = format!("segment failed{hint}; retrying ({retries}/2)");
         }
     }
 }
@@ -1496,10 +1513,11 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                         let action = scheduler.on_segment_done(window_end, seq, superseded);
                         if window_end.is_some() {
                             // A successful swap is on its way: the underrun
-                            // gap ends at the next bar boundary.
-                            if status.message == UNDERUNN_MSG {
-                                status.message = Status::DEFAULT_MESSAGE.into();
-                            }
+                            // gap ends at the next bar boundary. The underrun
+                            // warning and any retry notice are stale once
+                            // playback recovers (the retry message would
+                            // otherwise stick after the swap lands).
+                            clear_segment_message(&mut status);
                             // Segment swaps can claim recording tracks: the
                             // swap's loops register in the claim history just
                             // like a reload, so pends resolve in arrival order.
@@ -1536,7 +1554,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     cymbal_audio::ui_queue::UiEvent::Bar(n) => {
                         status.bar = n;
                         if scheduler.on_bar() {
-                            status.message = UNDERUNN_MSG.into();
+                            status.message = UNDERRUN_MSG.into();
                         }
                     }
                     cymbal_audio::ui_queue::UiEvent::MidiDropped(n) => {
@@ -1902,6 +1920,84 @@ mod tests {
         apply_ui_msg(&mut status, UiMsg::Info("exported out.wav".into()));
         assert_eq!(status.error, None);
         assert_eq!(status.message, "exported out.wav");
+    }
+
+    #[test]
+    fn retry_dispatch_folds_error_hint_into_message() {
+        // The density-cap hint lands on status.error from the Err msg and
+        // would be cleared by the retry dispatch before any render; the
+        // retry message must carry it instead.
+        let queue = Arc::new(AudioQueue::new(16));
+        let (tx, _rx) = mpsc::channel::<UiMsg>();
+        let reload_seq = Arc::new(AtomicU64::new(0));
+        let seq_lock = Arc::new(Mutex::new(()));
+        let spawner = SegmentSpawner {
+            base: std::path::Path::new("."),
+            reload_seq: &reload_seq,
+            seq_lock: &seq_lock,
+            msg_tx: &tx,
+            queue: &queue,
+        };
+        let mut scheduler = SegmentScheduler::new(0);
+        let mut status = Status::new();
+        status.set_error("pattern too dense for the render window".into());
+        spawner.dispatch(
+            &mut scheduler,
+            SegmentAction::Spawn { end: 0, retries: 1 },
+            "loop \"b\":\n    kick << \"x y\"\n",
+            &HashMap::new(),
+            false,
+            &mut status,
+        );
+        assert_eq!(status.error, None, "the error moves into the retry message");
+        assert_eq!(
+            status.message,
+            "segment failed (pattern too dense for the render window); retrying (1/2)"
+        );
+    }
+
+    #[test]
+    fn retry_dispatch_without_error_keeps_plain_message() {
+        let queue = Arc::new(AudioQueue::new(16));
+        let (tx, _rx) = mpsc::channel::<UiMsg>();
+        let reload_seq = Arc::new(AtomicU64::new(0));
+        let seq_lock = Arc::new(Mutex::new(()));
+        let spawner = SegmentSpawner {
+            base: std::path::Path::new("."),
+            reload_seq: &reload_seq,
+            seq_lock: &seq_lock,
+            msg_tx: &tx,
+            queue: &queue,
+        };
+        let mut scheduler = SegmentScheduler::new(0);
+        let mut status = Status::new();
+        spawner.dispatch(
+            &mut scheduler,
+            SegmentAction::Spawn { end: 0, retries: 2 },
+            "loop \"b\":\n    kick << \"x y\"\n",
+            &HashMap::new(),
+            false,
+            &mut status,
+        );
+        assert_eq!(status.message, "segment failed; retrying (2/2)");
+    }
+
+    #[test]
+    fn clear_segment_message_restores_default_only_for_segment_messages() {
+        let mut s = Status::new();
+        s.message = UNDERRUN_MSG.into();
+        clear_segment_message(&mut s);
+        assert_eq!(s.message, Status::DEFAULT_MESSAGE);
+        s.message =
+            "segment failed (pattern too dense for the render window); retrying (2/2)".into();
+        clear_segment_message(&mut s);
+        assert_eq!(s.message, Status::DEFAULT_MESSAGE);
+        s.message = "reloaded: nothing changed".into();
+        clear_segment_message(&mut s);
+        assert_eq!(s.message, "reloaded: nothing changed");
+        s.message = "MIDI queue overflow — 5 messages dropped".into();
+        clear_segment_message(&mut s);
+        assert_eq!(s.message, "MIDI queue overflow — 5 messages dropped");
     }
 
     #[test]
