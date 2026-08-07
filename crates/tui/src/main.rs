@@ -1034,6 +1034,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
         queue: &queue,
     };
     let mut latest_seq: u64 = 0;
+    let mut user_reload_seq: u64 = 0;
     let mut recent: Vec<(u64, Vec<String>)> = Vec::new();
     let mut pending: PendingClaims = HashMap::new();
     let mut record_ts: Option<String> = None;
@@ -1056,6 +1057,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 let _guard = seq_lock.lock().unwrap();
                                 reload_seq.fetch_add(1, Ordering::SeqCst) + 1
                             };
+                            user_reload_seq = seq;
                             spawn_reload(
                                 src,
                                 base,
@@ -1214,6 +1216,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 let _guard = seq_lock.lock().unwrap();
                                 reload_seq.fetch_add(1, Ordering::SeqCst) + 1
                             };
+                            user_reload_seq = seq;
                             spawn_reload(
                                 src,
                                 base,
@@ -1237,6 +1240,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 let _guard = seq_lock.lock().unwrap();
                                 reload_seq.fetch_add(1, Ordering::SeqCst) + 1
                             };
+                            user_reload_seq = seq;
                             spawn_reload(
                                 src,
                                 base,
@@ -1270,6 +1274,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     let _guard = seq_lock.lock().unwrap();
                                     reload_seq.fetch_add(1, Ordering::SeqCst) + 1
                                 };
+                                user_reload_seq = seq;
                                 spawn_reload(
                                     editor.content(),
                                     base,
@@ -1422,13 +1427,19 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     }
                     UiMsg::Err(e, seq) => {
                         if let Some(seq) = seq {
-                            // Only a reload outcome that is still the newest
-                            // settles the scheduler: a stale error (a newer
-                            // reload already settled) must not flip the result
-                            // to failure, or a late segment failure would
-                            // dispatch a retry that displaces the newer
-                            // reload's queued swap.
-                            let action = if seq > latest_seq {
+                            // Only the newest STARTED user reload settles the
+                            // scheduler. A failing reload never advances
+                            // latest_seq (that only moves on an accepted
+                            // Reloaded), so gating on it would let an older
+                            // reload's Err clear reload_in_flight while a
+                            // newer reload is still compiling: the stale
+                            // failure would then dispatch a stored retry that
+                            // displaces the newer reload's queued swap.
+                            // user_reload_seq counts user reload dispatches
+                            // only — reload_seq is shared with segment
+                            // dispatches, so gating on it would reject a
+                            // genuine Err when a segment dispatched in between.
+                            let action = if seq == user_reload_seq {
                                 scheduler.on_reload_settled(None)
                             } else {
                                 SegmentAction::None

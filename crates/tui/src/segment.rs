@@ -388,4 +388,40 @@ mod tests {
         none(s.on_reload_settled(Some(300)));
         assert_eq!(spawn(s.on_need_segment(300)), (300, 0));
     }
+
+    #[test]
+    fn overlapping_reloads_newest_settle_decides_the_stored_retry() {
+        // The main.rs Err handler calls on_reload_settled only when the
+        // settling seq is the newest started user reload's; a stale Err is
+        // skipped entirely (no scheduler call). These sequences pin the
+        // scheduler contract that gate relies on: with reloads 3 and 4 both
+        // started and a superseded segment failure stored, the retry must
+        // survive the stale reload's would-be settle and be decided only by
+        // the newest reload's settle — success drops it without dispatching,
+        // failure dispatches it (nothing else is queued to drive the engine).
+        let mut s = SegmentScheduler::new(300);
+        assert_eq!(spawn(s.on_need_segment(300)), (300, 0));
+        s.note_spawn(2);
+        s.on_reload_started(); // reload 3 (stale; its Err is gated off)
+        s.on_reload_started(); // reload 4 (newest)
+        none(s.on_segment_done(None, 2, true));
+        // reload 4 succeeds: stored retry dropped, nothing dispatched — its
+        // swap applies at the next bar boundary and the engine re-fires
+        none(s.on_reload_settled(Some(300)));
+        assert_eq!(spawn(s.on_need_segment(300)), (300, 0));
+    }
+
+    #[test]
+    fn overlapping_reloads_newest_failure_dispatches_the_stored_retry() {
+        let mut s = SegmentScheduler::new(300);
+        assert_eq!(spawn(s.on_need_segment(300)), (300, 0));
+        s.note_spawn(2);
+        s.on_reload_started(); // reload 3 (stale; its Err is gated off)
+        s.on_reload_started(); // reload 4 (newest)
+        none(s.on_segment_done(None, 2, true));
+        // reload 4 fails: no swap is coming from either reload; the engine's
+        // latch is still set from the original NeedSegment — the deferred
+        // retry must go out
+        assert_eq!(spawn(s.on_reload_settled(None)), (300, 1));
+    }
 }
