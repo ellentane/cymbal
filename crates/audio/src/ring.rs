@@ -20,6 +20,7 @@ pub enum Msg {
 pub struct AudioQueue {
     latest_swap: ArrayQueue<Msg>,
     fifo: ArrayQueue<Msg>,
+    retired: ArrayQueue<Arc<Timeline>>,
 }
 
 impl AudioQueue {
@@ -27,6 +28,7 @@ impl AudioQueue {
         Self {
             latest_swap: ArrayQueue::new(1),
             fifo: ArrayQueue::new(capacity),
+            retired: ArrayQueue::new(4),
         }
     }
 
@@ -42,6 +44,18 @@ impl AudioQueue {
 
     pub fn try_recv(&self) -> Option<Msg> {
         self.fifo.pop().or_else(|| self.latest_swap.pop())
+    }
+
+    pub fn push_retired(&self, tl: Arc<Timeline>) -> bool {
+        self.retired.push(tl).is_ok()
+    }
+
+    pub fn take_retired(&self) -> Vec<Arc<Timeline>> {
+        let mut out = Vec::new();
+        while let Some(tl) = self.retired.pop() {
+            out.push(tl);
+        }
+        out
     }
 }
 
@@ -169,5 +183,32 @@ mod tests {
         let q = AudioQueue::new(1);
         assert!(q.send(Msg::RecordStop).is_ok());
         assert!(q.send(Msg::RecordStop).is_err(), "fifo full -> Err");
+    }
+
+    #[test]
+    fn retired_timelines_are_drained_in_order() {
+        let q = AudioQueue::new(4);
+        let a = tl(1);
+        let b = tl(2);
+        assert!(q.push_retired(a.clone()));
+        assert!(q.push_retired(b.clone()));
+        let retired = q.take_retired();
+        assert_eq!(retired.len(), 2);
+        assert!(Arc::ptr_eq(&retired[0], &a));
+        assert!(Arc::ptr_eq(&retired[1], &b));
+        assert!(q.take_retired().is_empty(), "slot is drained");
+    }
+
+    #[test]
+    fn retired_overflow_is_bounded() {
+        let q = AudioQueue::new(2);
+        assert!(q.push_retired(tl(1)));
+        assert!(q.push_retired(tl(2)));
+        assert!(q.push_retired(tl(3)));
+        assert!(q.push_retired(tl(4)));
+        assert!(
+            !q.push_retired(tl(5)),
+            "overflowing the retired slot reports failure instead of allocating"
+        );
     }
 }

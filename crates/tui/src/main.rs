@@ -1288,6 +1288,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                     m => apply_ui_msg(&mut status, m),
                 }
             }
+            let _ = queue.take_retired();
             while let Some(ev) = ui_queue.try_pop() {
                 match ev {
                     cymbal_audio::ui_queue::UiEvent::Bar(n) => status.bar = n,

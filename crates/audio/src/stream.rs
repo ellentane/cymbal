@@ -116,6 +116,11 @@ pub fn start_audio(
                     engine.process(&mut scratch[..needed * 2]);
                     resampler.push(&scratch[..needed * 2]);
                 }
+                for tl in engine.take_retired() {
+                    if !queue.push_retired(tl) {
+                        break;
+                    }
+                }
                 if frames * 2 > stereo.len() {
                     stereo.resize(frames * 2, 0.0);
                 }

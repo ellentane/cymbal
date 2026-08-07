@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cymbal_core::dsp::Voice;
 use cymbal_core::mixer::{Master, VoiceOutput};
@@ -65,6 +65,7 @@ pub struct Engine {
     pulse_period: f64,
     midi_dropped: u64,
     midi_dropped_reported: u64,
+    retired: Mutex<Vec<Arc<Timeline>>>,
 }
 
 impl Engine {
@@ -101,11 +102,21 @@ impl Engine {
             pulse_period: 1.0,
             midi_dropped: 0,
             midi_dropped_reported: 0,
+            retired: Mutex::new(Vec::with_capacity(8)),
         }
     }
 
     pub fn submit_swap(&mut self, timeline: Arc<Timeline>, seq: u64, spares: Vec<Arc<Recorder>>) {
-        self.pending = Some((timeline, seq, spares));
+        if let Some((old, _, _)) = self.pending.replace((timeline, seq, spares)) {
+            self.retired.lock().unwrap().push(old);
+        }
+    }
+
+    pub fn take_retired(&self) -> Vec<Arc<Timeline>> {
+        self.retired
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap()
     }
 
     pub fn set_midi(&mut self, midi: Option<Arc<MidiOut>>) {
@@ -346,6 +357,7 @@ impl Engine {
             return;
         };
         if seq <= self.last_swap_seq {
+            self.retired.lock().unwrap().push(tl);
             return;
         }
         self.last_swap_seq = seq;
@@ -469,6 +481,10 @@ impl Engine {
 
         self.pulse_period = tl.bar_samples as f64 / 96.0;
         self.next_pulse_abs = now as f64 + self.pulse_period;
+
+        if let Some(old) = old_tl {
+            self.retired.lock().unwrap().push(old);
+        }
     }
 }
 
@@ -1931,6 +1947,33 @@ mod tests {
             claimed,
             (0..25).collect::<Vec<u32>>(),
             "every new loop claims a track, beyond the old 8-spare cap"
+        );
+    }
+
+    #[test]
+    fn retired_timeline_is_returned_not_dropped() {
+        let mut engine = Engine::new(120.0, 48000);
+        let a = tl(vec![], 0, vec![], 24000);
+        let b = tl(vec![], 1, vec![], 24000);
+        engine.submit_swap(a.clone(), 1, vec![]);
+        engine_step(&mut engine, 24000);
+        engine.submit_swap(b.clone(), 2, vec![]);
+        engine_step(&mut engine, 24000);
+        assert_eq!(
+            Arc::strong_count(&a),
+            2,
+            "the old timeline must survive the swap in the retirement slot"
+        );
+        let retired = engine.take_retired();
+        assert_eq!(retired.len(), 1, "exactly one timeline retired");
+        assert!(
+            Arc::ptr_eq(&retired[0], &a),
+            "the retired Arc is the previous timeline, not a copy"
+        );
+        assert_eq!(
+            engine.timeline.as_ref().map(|t| t.generation),
+            Some(1),
+            "the second timeline stays active"
         );
     }
 }
