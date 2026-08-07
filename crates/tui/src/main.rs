@@ -376,10 +376,15 @@ fn record_loop(
     )));
 }
 
+fn spares_needed(new_names: &[String], old: &HashMap<String, u64>) -> usize {
+    new_names.iter().filter(|n| !old.contains_key(*n)).count() + 8
+}
+
 fn spawn_reload(
     src: String,
     base: std::path::PathBuf,
     latest: HashMap<String, u64>,
+    recording: bool,
     seq: u64,
     msg_tx: mpsc::Sender<UiMsg>,
     queue: Arc<AudioQueue>,
@@ -389,7 +394,7 @@ fn spawn_reload(
             let gens = next_loop_generations(&latest, &names);
             match build_timeline_with(&src, SAMPLE_RATE, &base, &gens) {
                 Ok(tl) => {
-                    let needed = names.len().saturating_sub(latest.len()) + 8;
+                    let needed = spares_needed(&names, &latest);
                     let _ = msg_tx.send(UiMsg::Reloaded {
                         generations: gens,
                         loops: names,
@@ -398,9 +403,13 @@ fn spawn_reload(
                     if let Some(text) = cymbal_core::docs::help_text_src(&src) {
                         let _ = msg_tx.send(UiMsg::Help(text));
                     }
-                    let spares: Vec<_> = (0..needed)
-                        .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
-                        .collect();
+                    let spares: Vec<_> = if recording {
+                        (0..needed)
+                            .map(|_| cymbal_audio::recorder::Recorder::new(32, 4096))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let _ = queue.send(Msg::Swap(Arc::new(tl), seq, spares));
                 }
                 Err(e) => {
@@ -776,7 +785,15 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                             let latest = latest_loops.clone();
                             reload_seq += 1;
                             let seq = reload_seq;
-                            spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
+                            spawn_reload(
+                                src,
+                                base,
+                                latest,
+                                recording,
+                                seq,
+                                msg_tx.clone(),
+                                queue.clone(),
+                            );
                             status.clear_error();
                             status.message = "reloading...".into();
                         }
@@ -931,7 +948,15 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .collect();
                             reload_seq += 1;
                             let seq = reload_seq;
-                            spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
+                            spawn_reload(
+                                src,
+                                base,
+                                latest,
+                                recording,
+                                seq,
+                                msg_tx.clone(),
+                                queue.clone(),
+                            );
                         }
                         KeyCode::Char('-') => {
                             status.lower_tempo();
@@ -943,7 +968,15 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                 .collect();
                             reload_seq += 1;
                             let seq = reload_seq;
-                            spawn_reload(src, base, latest, seq, msg_tx.clone(), queue.clone());
+                            spawn_reload(
+                                src,
+                                base,
+                                latest,
+                                recording,
+                                seq,
+                                msg_tx.clone(),
+                                queue.clone(),
+                            );
                         }
                         KeyCode::Char('j') => {
                             midi_toggle_key(&mut status, &midi_out, &mut midi_sending);
@@ -969,6 +1002,7 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
                                     editor.content(),
                                     base,
                                     latest,
+                                    recording,
                                     seq,
                                     msg_tx.clone(),
                                     queue.clone(),
@@ -2023,6 +2057,31 @@ mod tests {
             flush_claim(3, 0, &recent, false),
             FlushAction::Ignore
         ));
+    }
+
+    #[test]
+    fn spares_needed_counts_net_additions() {
+        let old: HashMap<String, u64> =
+            ["a", "b", "c"].iter().map(|n| (n.to_string(), 1)).collect();
+        let new_names: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(spares_needed(&new_names, &old), 10);
+    }
+
+    #[test]
+    fn spares_needed_counts_replaced_loops() {
+        let old: HashMap<String, u64> = (0..30).map(|i| (format!("old-{i}"), 1u64)).collect();
+        let new_names: Vec<String> = (0..30).map(|i| format!("new-{i}")).collect();
+        assert_eq!(spares_needed(&new_names, &old), 38);
+    }
+
+    #[test]
+    fn spares_needed_keeps_buffer_when_nothing_changes() {
+        let old: HashMap<String, u64> = ["a", "b"].iter().map(|n| (n.to_string(), 1)).collect();
+        let new_names: Vec<String> = ["a", "b"].iter().map(|n| n.to_string()).collect();
+        assert_eq!(spares_needed(&new_names, &old), 8);
     }
 
     #[test]
