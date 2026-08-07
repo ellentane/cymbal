@@ -59,6 +59,8 @@ pub struct Engine {
     midi_cursor: usize,
     next_pulse_abs: f64,
     pulse_period: f64,
+    midi_dropped: u64,
+    midi_dropped_reported: u64,
 }
 
 impl Engine {
@@ -90,6 +92,8 @@ impl Engine {
             midi_cursor: 0,
             next_pulse_abs: f64::MAX,
             pulse_period: 1.0,
+            midi_dropped: 0,
+            midi_dropped_reported: 0,
         }
     }
 
@@ -116,6 +120,12 @@ impl Engine {
                 self.next_bar_abs += self.bar_samples;
                 if let Some(ui) = &self.ui {
                     ui.try_push(UiEvent::Bar(self.bar_count));
+                }
+                if self.midi_dropped > self.midi_dropped_reported {
+                    self.midi_dropped_reported = self.midi_dropped;
+                    if let Some(ui) = &self.ui {
+                        ui.try_push(UiEvent::MidiDropped(self.midi_dropped));
+                    }
                 }
                 self.bar_count += 1;
             }
@@ -147,20 +157,24 @@ impl Engine {
                     && tl.midi[self.midi_cursor].sample_offset + self.timeline_origin <= now
                 {
                     let m = &tl.midi[self.midi_cursor];
-                    if let Some(out) = &self.midi {
-                        out.try_send(MidiItem::Note {
+                    if let Some(out) = &self.midi
+                        && !out.try_send(MidiItem::Note {
                             offset: self.timeline_origin + m.sample_offset,
                             bytes: m.bytes,
-                        });
+                        })
+                    {
+                        self.midi_dropped = self.midi_dropped.saturating_add(1);
                     }
                     self.midi_cursor += 1;
                 }
             }
             while self.next_pulse_abs <= now as f64 {
-                if let Some(m) = &self.midi {
-                    m.try_send(MidiItem::Clock {
+                if let Some(m) = &self.midi
+                    && !m.try_send(MidiItem::Clock {
                         offset: self.next_pulse_abs as u64,
-                    });
+                    })
+                {
+                    self.midi_dropped = self.midi_dropped.saturating_add(1);
                 }
                 self.next_pulse_abs += self.pulse_period;
             }
@@ -1665,6 +1679,29 @@ mod tests {
         assert!(
             bars.windows(2).all(|w| w[0] < w[1]),
             "bar ticks must never go backward"
+        );
+    }
+
+    #[test]
+    fn midi_overflow_is_reported_once_per_change() {
+        use crate::ui_queue::{UiEvent, UiQueue};
+        let ui = UiQueue::new(64);
+        let midi = crate::midi_out::MidiOut::new(1);
+        let mut engine = Engine::new(120.0, 48000);
+        engine.set_midi(Some(midi.clone()));
+        engine.set_ui(Some(ui.clone()));
+        engine.submit_swap(tl(vec![], 0, vec![("b".into(), 0)], 24000), 1);
+        engine_step(&mut engine, 24001);
+        let mut dropped = Vec::new();
+        while let Some(ev) = ui.try_pop() {
+            if let UiEvent::MidiDropped(n) = ev {
+                dropped.push(n);
+            }
+        }
+        assert_eq!(
+            dropped,
+            vec![95],
+            "one report per bar with the cumulative dropped count"
         );
     }
 

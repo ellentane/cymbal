@@ -9,6 +9,7 @@ pub enum UiEvent {
         seq: u64,
         loop_index: u32,
     },
+    MidiDropped(u64),
 }
 
 pub struct UiQueue {

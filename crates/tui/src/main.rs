@@ -1106,6 +1106,9 @@ fn run_tui(file: &std::path::Path, midi_port: Option<String>) -> Result<(), Stri
             while let Some(ev) = ui_queue.try_pop() {
                 match ev {
                     cymbal_audio::ui_queue::UiEvent::Bar(n) => status.bar = n,
+                    cymbal_audio::ui_queue::UiEvent::MidiDropped(n) => {
+                        status.message = format!("MIDI queue overflow — {n} messages dropped");
+                    }
                     cymbal_audio::ui_queue::UiEvent::TrackClaimed {
                         rec,
                         seq,
