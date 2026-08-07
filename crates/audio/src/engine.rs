@@ -1555,6 +1555,12 @@ mod tests {
             vec![("b".into(), 1), ("c".into(), 1)],
             24000,
         );
+        let tl_c = tl(
+            vec![ev(0, VoiceKind::Hat, 2, 2400)],
+            2,
+            vec![("b".into(), 2), ("c".into(), 2), ("d".into(), 2)],
+            24000,
+        );
         let mut engine = Engine::new(120.0, 48000);
         let mut out = vec![0.0f32; 48000 * 2];
         let midi = crate::midi_out::MidiOut::new(8192);
@@ -1566,21 +1572,32 @@ mod tests {
         let rec = Recorder::new(4, 4);
         let rec2 = Recorder::new(4, 4);
         let spare = Recorder::new(4, 4);
+        let spare2 = Recorder::new(4, 4);
+        let spare3 = Recorder::new(4, 4);
         let tracks = vec![("b".into(), rec2.clone())];
         let spares = vec![spare.clone()];
+        let refill = vec![spare2.clone(), spare3.clone()];
         engine.stop_recording();
         COUNTING.with(|c| c.set(true));
         ALLOCS.store(0, Ordering::SeqCst);
         engine.start_recording(rec.clone(), tracks, spares);
         engine.submit_swap(tl_b, 2, vec![]);
         engine.process(&mut out);
+        engine.submit_swap(tl_c, 3, refill);
+        engine.process(&mut out);
+        assert_eq!(
+            engine.spares.len(),
+            1,
+            "the swap-carried spares must land in the pool, one claimed by \
+             the new loop"
+        );
         engine.stop_recording();
         let count = ALLOCS.load(Ordering::SeqCst);
         COUNTING.with(|c| c.set(false));
         assert_eq!(
             engine.timeline.as_ref().map(|t| t.generation),
-            Some(1),
-            "the counted swap must have applied"
+            Some(2),
+            "both counted swaps must have applied"
         );
         let b = rec2.take_filled().unwrap();
         assert!(
@@ -1589,8 +1606,8 @@ mod tests {
         );
         assert_eq!(
             count, 0,
-            "swap, triggers, clock pulses, bar and claimed-track events, and \
-             recording taps must not allocate"
+            "swap, spare refill and claim, triggers, clock pulses, bar and \
+             claimed-track events, and recording taps must not allocate"
         );
     }
 
