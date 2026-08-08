@@ -538,6 +538,7 @@ mod tests {
 
     struct Counting;
     static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_ALLOC_BT: Mutex<Option<std::backtrace::Backtrace>> = Mutex::new(None);
 
     // only the measuring test thread counts: parallel tests cannot pollute
     thread_local! {
@@ -547,7 +548,10 @@ mod tests {
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             if COUNTING.with(|c| c.get()) {
-                ALLOCS.fetch_add(1, Ordering::SeqCst);
+                if ALLOCS.fetch_add(1, Ordering::SeqCst) == 0 {
+                    *FIRST_ALLOC_BT.lock().unwrap() =
+                        Some(std::backtrace::Backtrace::force_capture());
+                }
             }
             unsafe { System.alloc(layout) }
         }
@@ -1688,6 +1692,17 @@ mod tests {
         engine.stop_recording();
         let count = ALLOCS.load(Ordering::SeqCst);
         COUNTING.with(|c| c.set(false));
+        if count != 0 {
+            eprintln!(
+                "FIRST COUNTED ALLOCATION:\n{}",
+                FIRST_ALLOC_BT
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|b| format!("{b}"))
+                    .unwrap_or_default()
+            );
+        }
         let mut segments = Vec::new();
         while let Some(ev) = ui.try_pop() {
             if let UiEvent::NeedSegment(end) = ev {
