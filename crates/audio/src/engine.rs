@@ -546,6 +546,7 @@ mod tests {
     }
 
     unsafe impl GlobalAlloc for Counting {
+        #[allow(clippy::collapsible_if)]
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             if COUNTING.with(|c| c.get()) {
                 if ALLOCS.fetch_add(1, Ordering::SeqCst) == 0 {
