@@ -72,7 +72,7 @@ impl Engine {
     pub fn new(tempo: f64, sample_rate: u32) -> Self {
         let transport = Transport::new(tempo, sample_rate);
         let bar_samples = transport.bar_samples();
-        Self {
+        let engine = Self {
             sample_rate,
             bar_samples,
             position: 0,
@@ -103,7 +103,12 @@ impl Engine {
             midi_dropped: 0,
             midi_dropped_reported: 0,
             retired: Mutex::new(Vec::with_capacity(8)),
-        }
+        };
+        // macOS boxes the pthread mutex lazily: the first lock allocates.
+        // Prime it here so the audio thread never allocates at first use.
+        let _prime = engine.retired.lock();
+        drop(_prime);
+        engine
     }
 
     pub fn submit_swap(&mut self, timeline: Arc<Timeline>, seq: u64, spares: Vec<Arc<Recorder>>) {
